@@ -1,2 +1,2 @@
 # CompactScript
-Compact is a personally created programming language. As the name suggests, its syntax is very compact. You can freely explore all kinds of code in it.
+CompactScript 是一种个人创建的编程语言。正如其名，它的语法非常紧凑。你可以自由地探索其中的各种代码。
