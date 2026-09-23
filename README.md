@@ -1,2 +1,3 @@
-# CompactScript
-CompactScript 是一种个人创建的编程语言。正如其名，它的语法非常紧凑。你可以自由地探索其中的各种代码。
+# #CompactScript
+CompactScript is a personally created programming language. As its name suggests, its syntax is very compact. You are free to explore the various code within it.
+**Currently, due to size constraints, the repository only contains HTML instead of an EXE.**
