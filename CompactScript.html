@@ -1,0 +1,2587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CompactScript</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            background: #000000;
+            overflow: hidden;
+            font-family: "Courier New", "Lucida Console", "Monaco", monospace;
+        }
+
+        #terminal {
+            width: 100%;
+            height: 100%;
+            background: #000000;
+            color: #ffffff;
+            padding: 16px 20px;
+            font-size: 18px;
+            line-height: 1.5;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            outline: none;
+            user-select: text;
+            -webkit-user-select: text;
+            caret-color: #ffffff;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        #terminal::-webkit-scrollbar {
+            display: none;
+            width: 0;
+            height: 0;
+        }
+
+        .cursor-block {
+            display: inline-block;
+            width: 10px;
+            height: 20px;
+            background: #ffffff;
+            vertical-align: text-bottom;
+            margin-left: 1px;
+            animation: blink 1s step-end infinite;
+            -webkit-animation: blink 1s step-end infinite;
+        }
+
+        @keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
+
+        @-webkit-keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
+
+        .err-msg { color: #ff5555; }
+        .hint-msg { color: #888888; }
+
+        #hidden-input {
+            position: fixed;
+            left: -9999px;
+            top: -9999px;
+            opacity: 0;
+            width: 1px;
+            height: 1px;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: transparent;
+            caret-color: transparent;
+            font-size: 1px;
+            padding: 0;
+            margin: 0;
+            z-index: -1;
+        }
+    </style>
+</head>
+<body>
+    <textarea id="hidden-input" rows="1" cols="1" autofocus></textarea>
+
+    <div id="terminal" tabindex="-1"></div>
+
+    <script>
+        (function() {
+            const terminal = document.getElementById('terminal');
+            const hiddenInput = document.getElementById('hidden-input');
+
+            const PROMPT = 'Script>';
+            const INPUT_PROMPT = 'input>';
+            const INPUT_CHOOSE_PROMPT = 'input-choose>';
+
+            function err(msg) {
+                return '<span class="err-msg">error: ' + escapeHtml(String(msg)) + '</span>';
+            }
+
+            function hint(msg) {
+                return '<span class="hint-msg">' + escapeHtml(String(msg)) + '</span>';
+            }
+
+            function ok(value) { return { ok: true, value: value }; }
+            function fail(message) { return { ok: false, error: message }; }
+
+            function varNameError(name) {
+                if (typeof name !== 'string' || name === '') {
+                    return 'variable name cannot be empty';
+                }
+                if (!/^[A-Za-z_]/.test(name)) {
+                    return 'invalid variable name "' + name + '": must start with a letter or underscore';
+                }
+                if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+                    return 'invalid variable name "' + name + '": only letters, digits and underscores are allowed';
+                }
+                return null;
+            }
+
+            function colorError(name) {
+                if (!Object.prototype.hasOwnProperty.call(COLOR_MAP, name)) {
+                    return 'unknown color "' + name + '". Available colors: ' +
+                        Object.keys(COLOR_MAP).join(', ');
+                }
+                return null;
+            }
+
+            const COLOR_MAP = {
+                'red': '#ff0000',
+                'light_red': '#ff6666',
+                'dark_red': '#990000',
+                'green': '#00ff00',
+                'light_green': '#66ff66',
+                'dark_green': '#009900',
+                'blue': '#0000ff',
+                'light_blue': '#6666ff',
+                'dark_blue': '#000099',
+                'yellow': '#ffff00',
+                'light_yellow': '#ffff66',
+                'dark_yellow': '#999900',
+                'cyan': '#00ffff',
+                'light_cyan': '#66ffff',
+                'dark_cyan': '#009999',
+                'magenta': '#ff00ff',
+                'light_magenta': '#ff66ff',
+                'dark_magenta': '#990099',
+                'orange': '#ffa500',
+                'light_orange': '#ffcc66',
+                'dark_orange': '#cc8400',
+                'purple': '#800080',
+                'light_purple': '#cc66cc',
+                'dark_purple': '#4d004d'
+            };
+
+            const CS_HELP_TEXT = [
+                '=== CompactScript Command Syntax Reference ===',
+                '',
+                '[Variable Creation]',
+                '  text["name"]"value"           create text variable',
+                '  number["name"]"123"          create number variable',
+                '  text["name"]-color["color"]-"value"  create colored text variable',
+                '  number["name"]-color["color"]-"123"  create colored number variable',
+                '',
+                '  Multiple colors in one variable (text only can use -n-):',
+                '    text["v"]-color["red"]"a"-color["green"]"b"      single line, two colors',
+                '    text["v"]-color["red"]"a"-n-"b"                  two lines, both red',
+                '    text["v"]-color["red"]"a"-n-color["blue"]"b"     two lines, red then blue',
+                '    text["v"]-color["red"]"a"-nr-"b"                 two lines, red then default',
+                '    text["v"]-color["red"]"a"-r-"b"                  single line, red then default',
+                '    number["v"]-color["red"]"12"-color["yellow"]"34" single line, two colors',
+                '',
+                '  Color and newline control tokens between strings:',
+                '    -n-      newline, keep current color',
+                '    -nr-     newline, reset color to default (white)',
+                '    -r-      no newline, reset color to default (white)',
+                '    -color["c"]  change current color (no newline)',
+                '',
+                '[Variable Access]',
+                '  text["name"]                  output text variable (with colors if set)',
+                '  number["name"]                output number variable (with colors if set)',
+                '',
+                '[Multi-Color Output]',
+                '  text-color["c1"]"s1"-color["c2"]"s2"     same line, two colors',
+                '  text-color["c1"]"s1"-n-color["c2"]"s2"   two lines, two colors',
+                '  text-color["c1"]"s1"-n-"s2"              two lines, both c1',
+                '  text-color["c1"]"s1"-nr-"s2"             two lines, c1 then default',
+                '  text-color["c1"]"s1"-r-"s2"              same line, c1 then default',
+                '  number-color["c1"]"s1"-color["c2"]"s2"   number can only be single line',
+                '',
+                '[Variable Type Conversion]',
+                '  variable-type["name"]-number  convert a text variable to a number variable',
+                '  variable-type["name"]-text    convert a number variable to a text variable',
+                '',
+                '[Variable Color]',
+                '  variable-color["name"]-color["color"]  set single color for a variable',
+                '',
+                '[Concatenation]',
+                '  text[concatenation]-"expr"    output concatenated text, expr can contain ["varName"]',
+                '  number[concatenation]-"expr"  output numeric string built by ["varName"] references',
+                '',
+                '[List]',
+                '  list["name"]-item1(cmd1)-item2(cmd2)-...  create a list',
+                '  list["name"]                  create an empty list',
+                '  list["name"]"item"            execute the command stored in item',
+                '  list                          list all lists and their items',
+                '  list-add["name"]-item(cmd)    add a new item to an existing list',
+                '  list-delete["name"]"item"     delete an item from a list',
+                '  list-delete["name"]=all       delete all items inside a list',
+                '  list-delete =all              delete all lists',
+                '  list-rename["old"]"new"       rename a list',
+                '  list-replace["name"]-oldItem-newItem(newCmd)  replace an item',
+                '    The old item name is enough; no need to match its old command.',
+                '    Example: list-replace["ghg"]-1-2(text"dsds")',
+                '',
+                '[Color System]',
+                '  Available colors (24 total):',
+                '    red, light_red, dark_red, green, light_green, dark_green,',
+                '    blue, light_blue, dark_blue, yellow, light_yellow, dark_yellow,',
+                '    cyan, light_cyan, dark_cyan, magenta, light_magenta, dark_magenta,',
+                '    orange, light_orange, dark_orange, purple, light_purple, dark_purple',
+                '',
+                '[Variable Management]',
+                '  variable                      list all variables',
+                '  variable-delete "name"        delete specific variable',
+                '  variable-delete =all          delete all variables',
+                '  variable-rename["old"]"new"   rename variable',
+                '  variable-replace["name"]"new" replace variable content (supports -n-)',
+                '',
+                '[Input]',
+                '  input["var"]-text"prompt"    prompt for text input',
+                '  input["var"]-number"prompt"  prompt for number input',
+                '  input["var"]-color["c"]-text"prompt"    set variable color',
+                '  input["var"]-text"p1"-color["c"]"p2"    multi-color prompt (same line)',
+                '  input["var"]-text"p1"-n-color["c"]"p2"  multi-color prompt (two lines)',
+                '  input["var"]-text"p1"-nr-"p2"           two lines, reset color between',
+                '  input["var"]-text"p1"-r-"p2"            same line, reset color between',
+                '    Prompt first segment uses the variable color (if set) as its default.',
+                '    The stored input variable itself is single-colored.',
+                '',
+                '  input-choose["var"]-text"prompt"-"opt1"="val1"-"opt2"="val2"...  choose from options (stores value)',
+                '  input-choose["var"]-number"prompt"-"opt1"="1"-"opt2"="2"...      numeric choices (stores value)',
+                '  input-choose["var"]-color["c"]-number"prompt"-"a"="1"-"b"="2"    variable color',
+                '    Prompt supports multi-color, -n-, -nr- and -r- just like input.',
+                '    Prompt becomes "input-choose>" and only listed option names are accepted.',
+                '    Valid option sets the variable to the corresponding value.',
+                '    Invalid option shows: That option does not exist. Please enter a valid option.',
+                '',
+                '  input-choose"prompt"-"opt1"=(cmd1)-"opt2"=(cmd2)...  execute a command by typing an option',
+                '    No variable is stored; the matched command is executed directly.',
+                '    Example: input-choose"sss"-"ggg"=(text"fdf")-"gggf"=(number"444")',
+                '    Prompt color via -color["c"] after the prompt, e.g.',
+                '      input-choose"sss"-color["light_blue"]-"ggg"=(text"fdf")',
+                '    Invalid option shows the same grey message as above.',
+                '',
+                '  input-choose[long-press]-["var"]-type"prompt"-time["N"]"key"="value"...  hold a key to store value',
+                '    Press and hold a single key for N seconds to set the variable.',
+                '    The prompt becomes "input-choose>[]" and the currently held key appears in [].',
+                '    Multiple entries with the same key are allowed as long as their times differ.',
+                '',
+                '  input-choose[long-press]"prompt"-time["N"]"key"=(cmd)...  hold a key to execute a command',
+                '    No variable is stored; the matched command is executed directly.',
+                '    Example:',
+                '      input-choose[long-press]"ddd"-time["5"]"s"=(number"777")-time["15"]"h"=(number"111")',
+                '    Prompt color via -color["c"] after the prompt, e.g.',
+                '      input-choose[long-press]"ddd"-color["red"]-time["5"]"s"=(number"777")',
+                '    Invalid key shows the same grey message as input-choose.',
+                '',
+                '[String]',
+                '  length"text"                 length of literal string',
+                '  length["varName"]            length of text variable',
+                '  length[list]-["name"]        number of items in a list',
+                '  length[list]-["name"]"item"  length of the command stored in an item',
+                '  length[functional]-["name"]  number of commands in a function',
+                '  length[functional]-["name"]-N  length of the N-th command (1-based)',
+                '',
+                '[Computation]',
+                '  computation "expr"           evaluate expression',
+                '    supports: + - * / ^ ** sqrt() ! and ["var"]',
+                '  computation[modulo]"12/5"    remainder division',
+                '  computation[round]"7.2"      round to integer',
+                '  computation[variable]"1+1"-["lkl"]  store result',
+                '  computation[variable-modulo]"12/5"-["var"]  store quotient and remainder',
+                '  computation[variable-round]"7.2"-["var"]  store rounded result',
+                '  Add -color["color"] at the end for colored output.',
+                '',
+                '[Conditional]',
+                '  if["var1"]-op-["var2"]-true=(cmd)-false=(cmd)',
+                '    op: -eq -ne -gt -lt -ge -le',
+                '',
+                '[While Loop]',
+                '  while["var1"]-op-["var2"]-do(cmd1)-(cmd2)-...',
+                '',
+                '[Function]',
+                '  functional                    list all functions',
+                '  functional["name"]-(cmd1)-(cmd2)-...  define a function',
+                '  functional["name"]              call the function',
+                '  functional-rename["old"]"new"   rename a function',
+                '  functional-delete "name"        delete specific function',
+                '  functional-delete =all          delete all functions',
+                '  functional-replace["name"]-(cmd1)-(cmd2)-...  replace function body',
+                '',
+                '[Save & Load]',
+                '  save"name"                    export a .cscrip file (plain text, default)',
+                '  save"name"-xor                export a .cscrip file with XOR-encrypted payload',
+                '    Files are exported to your downloads folder.',
+                '  load                          open file picker to load a .cscrip file',
+                '    Encrypted and plain .cscrip files are both supported; the loader auto-detects.',
+                '    If the file is corrupted or the extension does not match, a red error is shown.',
+                '',
+                '[System & Utility]',
+                '  clear, cs-help, help',
+                '  time"seconds"-command        schedule command after delay',
+                '  time["varName"]-command      delay from number variable',
+                '  repeat"n"-command            repeat n times',
+                '  repeat["varName"]-command    repeat using variable',
+                '  random "a"-"b"-"c"           random pick from args',
+                '  random "1"-"10"              random integer range',
+                '  random(cmd1)-(cmd2)-...      randomly execute one command',
+                '  random"N"-(cmd1)-(cmd2)-...  randomly execute N commands',
+                '  random"N"-text"a"-"b"-"c"    randomly pick N texts',
+                '  random"N"-number"1"-"5"      randomly pick N unique integers',
+                '  random-number"1"-"10"        random integer in range',
+                '  random-text"1"-"10"          randomly pick one text',
+                '  random-uuid                  generate random UUID',
+                '  run(cmd1)-(cmd2)-...         execute multiple commands',
+                '',
+                '[Comments]',
+                '  ; or # at line start         comment line ignored',
+                '',
+                'All input is ASCII only, non-ASCII chars become ?',
+                'Shift+Enter inserts a newline; each line shows a prompt, newlines are removed on submit.'
+            ].join('\n');
+
+            const COMMAND_HELP = CS_HELP_TEXT;
+
+            let currentInput = '';
+            let outputLines = [];
+            let variables = {};
+            let functions = {};
+            let lists = {};
+            let pendingInput = null;
+
+            /* ============ Utility ============ */
+
+            function sanitizeAscii(str) {
+                let result = '';
+                for (const ch of str) {
+                    const code = ch.charCodeAt(0);
+                    if ((code >= 32 && code <= 126) || code === 10 || code === 13) {
+                        if (code === 13) result += '\n';
+                        else result += ch;
+                    } else result += '?';
+                }
+                return result;
+            }
+
+            function escapeHtml(str) {
+                return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
+
+            function htmlWithBr(str) {
+                return escapeHtml(str).replace(/\n/g, '<br>');
+            }
+
+            function renderSegments(segments) {
+                let html = '';
+                for (const seg of segments) {
+                    if (seg.text === '\n') { html += '<br>'; continue; }
+                    const text = escapeHtml(seg.text).replace(/\n/g, '<br>');
+                    if (seg.color && COLOR_MAP[seg.color]) {
+                        html += '<span style="color: ' + COLOR_MAP[seg.color] + '">' + text + '</span>';
+                    } else {
+                        html += text;
+                    }
+                }
+                return html;
+            }
+
+            function renderVariable(v) {
+                if (v.segments && v.segments.length > 0) return renderSegments(v.segments);
+                let text;
+                if (typeof v.value === 'string') text = v.value;
+                else {
+                    text = formatNumber(v.value);
+                    if (text === null) text = String(v.value);
+                }
+                if (v.color && COLOR_MAP[v.color]) {
+                    return '<span style="color: ' + COLOR_MAP[v.color] + '">' + htmlWithBr(text) + '</span>';
+                }
+                return escapeHtml(text);
+            }
+
+            function render() {
+                let html = '';
+                outputLines.forEach(line => { html += line + '\n'; });
+                let prompt;
+                if (pendingInput) {
+                    if (pendingInput.kind === 'choose' || pendingInput.kind === 'choose-exec') {
+                        prompt = INPUT_CHOOSE_PROMPT;
+                    } else if (pendingInput.kind === 'long-press' || pendingInput.kind === 'long-press-exec') {
+                        const key = pendingInput.pressedKey || '';
+                        prompt = INPUT_CHOOSE_PROMPT + '[' + escapeHtml(key) + ']';
+                    } else {
+                        prompt = INPUT_PROMPT;
+                    }
+                } else {
+                    prompt = PROMPT;
+                }
+                const lines = currentInput.split('\n');
+                lines.forEach((line, index) => {
+                    if (index === lines.length - 1) {
+                        html += prompt + escapeHtml(line);
+                        html += '<span class="cursor-block"></span>';
+                    } else html += prompt + escapeHtml(line) + '\n';
+                });
+                terminal.innerHTML = html;
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+
+            function formatNumber(num) {
+                if (typeof num !== 'number' || isNaN(num) || !isFinite(num)) return null;
+                let str = num.toFixed(10);
+                str = str.replace(/\.?0+$/, '');
+                if (str === '-0') str = '0';
+                return str;
+            }
+
+            function isValidNumber(str) {
+                return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(String(str).trim());
+            }
+
+            function generateUUID() {
+                if (window.crypto && window.crypto.getRandomValues) {
+                    const bytes = new Uint8Array(16);
+                    window.crypto.getRandomValues(bytes);
+                    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                    const hex = [];
+                    for (let i = 0; i < 16; i++) hex.push(bytes[i].toString(16).padStart(2, '0'));
+                    return [
+                        hex.slice(0, 4).join(''), hex.slice(4, 6).join(''),
+                        hex.slice(6, 8).join(''), hex.slice(8, 10).join(''),
+                        hex.slice(10, 16).join('')
+                    ].join('-');
+                } else {
+                    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                        const r = Math.random() * 16 | 0;
+                        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                        return v.toString(16);
+                    });
+                }
+            }
+
+            function factorial(n) {
+                if (n < 0 || !Number.isInteger(n) || n > 170) return NaN;
+                let result = 1;
+                for (let i = 2; i <= n; i++) result *= i;
+                return result;
+            }
+
+            /* ============ Save / Load (file-based, .cscrip only with optional XOR) ============ */
+
+            const CS_MAGIC_TEXT = 'CSCRIPT-CSCRIP-V1\n';
+            const CS_MAGIC_XOR = 'CSCRIPT-CSCRIP-XOR-V1\n';
+            const FILE_EXT = '.cscrip';
+
+            const XOR_KEY = new Uint8Array([
+                0x5A, 0x37, 0xC1, 0x9E, 0x42, 0x88, 0x1D, 0xF6,
+                0x33, 0x7B, 0xA4, 0xE0, 0x5C, 0x91, 0x2F, 0xD8
+            ]);
+
+            function xorBytes(bytes) {
+                const out = new Uint8Array(bytes.length);
+                for (let i = 0; i < bytes.length; i++) {
+                    out[i] = bytes[i] ^ XOR_KEY[i % XOR_KEY.length];
+                }
+                return out;
+            }
+
+            function saveToFile(name, encrypted) {
+                const data = { variables, functions, lists };
+                let json;
+                try { json = JSON.stringify(data); }
+                catch (e) { return err('save: could not serialize data (' + e.message + ')'); }
+
+                let blob;
+                try {
+                    if (encrypted) {
+                        const headerBytes = new TextEncoder().encode(CS_MAGIC_XOR);
+                        const jsonBytes = new TextEncoder().encode(json);
+                        const xored = xorBytes(jsonBytes);
+                        const bytes = new Uint8Array(headerBytes.length + xored.length);
+                        bytes.set(headerBytes, 0);
+                        bytes.set(xored, headerBytes.length);
+                        blob = new Blob([bytes], { type: 'application/octet-stream' });
+                    } else {
+                        const text = CS_MAGIC_TEXT + json;
+                        blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+                    }
+                } catch (e) {
+                    return err('save: could not build file (' + e.message + ')');
+                }
+
+                try {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = name + FILE_EXT;
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(url), 2000);
+                } catch (e) {
+                    return err('save: download failed (' + e.message + ')');
+                }
+
+                return hint('Saved as ' + name + FILE_EXT + (encrypted ? ' (XOR-encrypted)' : ''));
+            }
+
+            function openLoadDialog() {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.cscrip,text/plain,application/octet-stream';
+                input.style.display = 'none';
+                document.body.appendChild(input);
+
+                let handled = false;
+
+                input.addEventListener('change', async function(e) {
+                    if (handled) return;
+                    handled = true;
+                    const file = e.target.files && e.target.files[0];
+                    if (document.body.contains(input)) document.body.removeChild(input);
+                    if (!file) {
+                        setTimeout(() => hiddenInput.focus(), 0);
+                        return;
+                    }
+                    try { await loadFromFile(file); }
+                    catch (ex) {
+                        outputLines.push(err('load: unexpected error (' + ex.message + ')'));
+                        render();
+                    }
+                    setTimeout(() => hiddenInput.focus(), 0);
+                });
+
+                input.addEventListener('cancel', function() {
+                    if (handled) return;
+                    handled = true;
+                    if (document.body.contains(input)) document.body.removeChild(input);
+                    setTimeout(() => hiddenInput.focus(), 0);
+                });
+
+                try { input.click(); }
+                catch (e) {
+                    if (document.body.contains(input)) document.body.removeChild(input);
+                    outputLines.push(err('load: could not open file picker (' + e.message + ')'));
+                    render();
+                }
+            }
+
+            async function loadFromFile(file) {
+                const name = file.name || '(unnamed)';
+                const lowerName = name.toLowerCase();
+
+                if (!lowerName.endsWith(FILE_EXT)) {
+                    outputLines.push(err('load: unsupported file extension "' + name +
+                        '". Only ' + FILE_EXT + ' files are allowed.'));
+                    render();
+                    return;
+                }
+
+                let bytes;
+                try {
+                    const buffer = await file.arrayBuffer();
+                    bytes = new Uint8Array(buffer);
+                } catch (e) {
+                    outputLines.push(err('load: failed to read file "' + name + '" (' + e.message + ')'));
+                    render();
+                    return;
+                }
+
+                if (bytes.length === 0) {
+                    outputLines.push(err('load: file "' + name + '" is empty or corrupted.'));
+                    render();
+                    return;
+                }
+
+                const xorHeaderBytes = new TextEncoder().encode(CS_MAGIC_XOR);
+                const plainHeaderBytes = new TextEncoder().encode(CS_MAGIC_TEXT);
+
+                let isXor = false;
+                if (bytes.length >= xorHeaderBytes.length) {
+                    let match = true;
+                    for (let i = 0; i < xorHeaderBytes.length; i++) {
+                        if (bytes[i] !== xorHeaderBytes[i]) { match = false; break; }
+                    }
+                    if (match) isXor = true;
+                }
+
+                let jsonText;
+                if (isXor) {
+                    const payload = bytes.slice(xorHeaderBytes.length);
+                    const decoded = xorBytes(payload);
+                    try { jsonText = new TextDecoder('utf-8', { fatal: true }).decode(decoded); }
+                    catch (e) {
+                        outputLines.push(err('load: ' + FILE_EXT + ' file "' + name +
+                            '" is corrupted (invalid XOR-encoded data).'));
+                        render();
+                        return;
+                    }
+                } else {
+                    if (bytes.length < plainHeaderBytes.length) {
+                        outputLines.push(err('load: ' + FILE_EXT + ' file "' + name + '" is too short or corrupted.'));
+                        render();
+                        return;
+                    }
+                    for (let i = 0; i < plainHeaderBytes.length; i++) {
+                        if (bytes[i] !== plainHeaderBytes[i]) {
+                            outputLines.push(err('load: file content does not match ' + FILE_EXT + ' format. ' +
+                                'The file may be corrupted or have an incorrect extension.'));
+                            render();
+                            return;
+                        }
+                    }
+                    let text;
+                    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+                    catch (e) {
+                        outputLines.push(err('load: ' + FILE_EXT + ' file "' + name +
+                            '" is corrupted (invalid text encoding).'));
+                        render();
+                        return;
+                    }
+                    jsonText = text.substring(CS_MAGIC_TEXT.length);
+                }
+
+                let parsed;
+                try { parsed = JSON.parse(jsonText); }
+                catch (e) {
+                    outputLines.push(err('load: ' + FILE_EXT + ' file "' + name + '" is corrupted and cannot be parsed.'));
+                    render();
+                    return;
+                }
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    outputLines.push(err('load: ' + FILE_EXT + ' file "' + name + '" is corrupted (invalid data structure).'));
+                    render();
+                    return;
+                }
+                applyLoadedData(parsed);
+                outputLines.push(hint('Loaded successfully from ' + name +
+                    (isXor ? ' (XOR-encrypted)' : '')));
+                render();
+            }
+
+            function applyLoadedData(parsed) {
+                if (parsed && typeof parsed === 'object' && parsed.variables !== undefined) {
+                    variables = parsed.variables || {};
+                    functions = parsed.functions || {};
+                    lists = parsed.lists || {};
+                } else {
+                    variables = parsed || {};
+                    functions = {};
+                    lists = {};
+                }
+            }
+
+            /* ============ Multi-color value parsing ============ */
+
+            function tokenizeValueExpr(str) {
+                const tokens = [];
+                let i = 0;
+                while (i < str.length) {
+                    while (i < str.length && /\s/.test(str[i])) i++;
+                    if (i >= str.length) break;
+
+                    if (str[i] === '"') {
+                        let j = i + 1;
+                        while (j < str.length && str[j] !== '"') j++;
+                        if (j >= str.length) return fail('unterminated string literal');
+                        tokens.push({ type: 'string', value: str.slice(i + 1, j) });
+                        i = j + 1;
+                        continue;
+                    }
+
+                    if (str[i] === '-') {
+                        i++;
+                        while (i < str.length && /\s/.test(str[i])) i++;
+
+                        if (i < str.length && str[i].toLowerCase() === 'n') {
+                            let saveN = i;
+                            i++;
+                            while (i < str.length && /\s/.test(str[i])) i++;
+
+                            if (i < str.length && str[i].toLowerCase() === 'r') {
+                                let saveR = i;
+                                i++;
+                                while (i < str.length && /\s/.test(str[i])) i++;
+                                if (i < str.length && str[i] === '-') {
+                                    i++;
+                                    tokens.push({ type: 'newline-reset' });
+                                    while (i < str.length && /\s/.test(str[i])) i++;
+                                    const colorAfter = str.slice(i).match(/^color\s*\[\s*"([^"]+)"\s*\]/i);
+                                    if (colorAfter) {
+                                        tokens.push({ type: 'color', value: colorAfter[1] });
+                                        i += colorAfter[0].length;
+                                    }
+                                    continue;
+                                }
+                                i = saveR;
+                            }
+
+                            if (i < str.length && str[i] === '-') {
+                                i++;
+                                tokens.push({ type: 'newline' });
+                                while (i < str.length && /\s/.test(str[i])) i++;
+                                const colorAfterN = str.slice(i).match(/^color\s*\[\s*"([^"]+)"\s*\]/i);
+                                if (colorAfterN) {
+                                    tokens.push({ type: 'color', value: colorAfterN[1] });
+                                    i += colorAfterN[0].length;
+                                }
+                                continue;
+                            }
+                            i = saveN;
+                        }
+
+                        if (i < str.length && str[i].toLowerCase() === 'r') {
+                            let saveR = i;
+                            i++;
+                            while (i < str.length && /\s/.test(str[i])) i++;
+                            if (i < str.length && str[i] === '-') {
+                                i++;
+                                tokens.push({ type: 'reset' });
+                                while (i < str.length && /\s/.test(str[i])) i++;
+                                const colorAfter = str.slice(i).match(/^color\s*\[\s*"([^"]+)"\s*\]/i);
+                                if (colorAfter) {
+                                    tokens.push({ type: 'color', value: colorAfter[1] });
+                                    i += colorAfter[0].length;
+                                }
+                                continue;
+                            }
+                            i = saveR;
+                        }
+
+                        const colorMatch = str.slice(i).match(/^color\s*\[\s*"([^"]+)"\s*\]/i);
+                        if (colorMatch) {
+                            tokens.push({ type: 'color', value: colorMatch[1] });
+                            i += colorMatch[0].length;
+                            continue;
+                        }
+
+                        tokens.push({ type: 'dash' });
+                        continue;
+                    }
+
+                    return fail('unexpected character "' + str[i] + '"');
+                }
+                return ok(tokens);
+            }
+
+            function parseMultiColorValue(str, initialColor, allowNewlines) {
+                const tr = tokenizeValueExpr(str);
+                if (!tr.ok) return tr;
+                const tokens = tr.value;
+                if (tokens.length === 0) return fail('empty value expression');
+
+                const segments = [];
+                let currentColor = initialColor;
+                let trailingColor = null;
+
+                for (const tok of tokens) {
+                    if (tok.type === 'string') {
+                        if (!allowNewlines && tok.value.includes('\n')) {
+                            return fail('newlines are not allowed in this expression');
+                        }
+                        segments.push({ color: currentColor, text: tok.value });
+                        trailingColor = null;
+                    } else if (tok.type === 'newline') {
+                        if (!allowNewlines) return fail('newlines are not allowed in this expression');
+                        segments.push({ color: null, text: '\n' });
+                        trailingColor = null;
+                    } else if (tok.type === 'newline-reset') {
+                        if (!allowNewlines) return fail('newlines are not allowed in this expression');
+                        segments.push({ color: null, text: '\n' });
+                        currentColor = null;
+                        trailingColor = null;
+                    } else if (tok.type === 'reset') {
+                        currentColor = null;
+                        trailingColor = null;
+                    } else if (tok.type === 'color') {
+                        const ce = colorError(tok.value);
+                        if (ce) return fail(ce);
+                        currentColor = tok.value;
+                        trailingColor = tok.value;
+                    }
+                }
+
+                if (segments.length === 0) return fail('empty value expression');
+
+                if (trailingColor !== null) {
+                    for (let k = segments.length - 1; k >= 0; k--) {
+                        if (segments[k].text !== '\n') {
+                            segments[k].color = trailingColor;
+                            break;
+                        }
+                    }
+                }
+
+                return ok(segments);
+            }
+
+            // Convert a list of {type, value} prompt tokens into segments.
+            function promptTokensToSegments(tokens) {
+                const segments = [];
+                let currentColor = null;
+                let trailingColor = null;
+                for (const tok of tokens) {
+                    if (tok.type === 'string') {
+                        segments.push({ color: currentColor, text: tok.value });
+                        trailingColor = null;
+                    } else if (tok.type === 'color') {
+                        currentColor = tok.value;
+                        trailingColor = tok.value;
+                    } else if (tok.type === 'newline') {
+                        segments.push({ color: null, text: '\n' });
+                        trailingColor = null;
+                    } else if (tok.type === 'newline-reset') {
+                        segments.push({ color: null, text: '\n' });
+                        currentColor = null;
+                        trailingColor = null;
+                    } else if (tok.type === 'reset') {
+                        currentColor = null;
+                        trailingColor = null;
+                    }
+                }
+                if (trailingColor !== null) {
+                    for (let k = segments.length - 1; k >= 0; k--) {
+                        if (segments[k].text !== '\n') {
+                            segments[k].color = trailingColor;
+                            break;
+                        }
+                    }
+                }
+                return segments;
+            }
+
+            function buildVariable(type, segments, allowNewlines) {
+                if (!segments || segments.length === 0) return fail('empty value');
+                let hasColor = false, hasNewline = false;
+                const colors = new Set();
+                for (const seg of segments) {
+                    if (seg.text === '\n') hasNewline = true;
+                    if (seg.color) { hasColor = true; colors.add(seg.color); }
+                }
+                if (!allowNewlines && hasNewline) return fail('newlines are not allowed in this expression');
+                const fullText = segments.map(s => s.text).join('');
+
+                if (type === 'number') {
+                    if (!isValidNumber(fullText)) return fail('"' + fullText + '" is not a valid number');
+                    const v = { type: 'number', value: parseFloat(fullText) };
+                    if (hasColor || hasNewline) {
+                        v.segments = segments;
+                        if (colors.size === 1 && !hasNewline) v.color = [...colors][0];
+                    }
+                    return ok(v);
+                } else {
+                    const v = { type: 'text', value: fullText };
+                    if (hasColor || hasNewline) {
+                        v.segments = segments;
+                        if (colors.size === 1) v.color = [...colors][0];
+                    }
+                    return ok(v);
+                }
+            }
+
+            function extractSubCommands(str) {
+                const subcommands = [];
+                let i = 0;
+                const len = str.length;
+                while (i < len) {
+                    while (i < len && (str[i] === ' ' || str[i] === '\t' || str[i] === '-')) i++;
+                    if (i >= len) break;
+                    if (str[i] !== '(') return [];
+                    let depth = 0, inString = false, start = i;
+                    for (; i < len; i++) {
+                        const ch = str[i];
+                        if (inString) {
+                            if (ch === '"') inString = false;
+                            continue;
+                        }
+                        if (ch === '"') { inString = true; continue; }
+                        if (ch === '(') depth++;
+                        else if (ch === ')') {
+                            depth--;
+                            if (depth === 0) {
+                                subcommands.push(str.substring(start + 1, i).trim());
+                                i++;
+                                break;
+                            }
+                        }
+                    }
+                    if (depth !== 0) return [];
+                }
+                return subcommands;
+            }
+
+            function extractParenthesized(str, startPos) {
+                let i = startPos;
+                while (i < str.length && (str[i] === ' ' || str[i] === '\t')) i++;
+                if (i >= str.length || str[i] !== '(') return null;
+                let depth = 0, inString = false, start = i;
+                for (; i < str.length; i++) {
+                    const ch = str[i];
+                    if (inString) {
+                        if (ch === '"') inString = false;
+                        continue;
+                    }
+                    if (ch === '"') { inString = true; continue; }
+                    if (ch === '(') depth++;
+                    else if (ch === ')') {
+                        depth--;
+                        if (depth === 0) {
+                            return { content: str.substring(start + 1, i).trim(), endPos: i + 1 };
+                        }
+                    }
+                }
+                return null;
+            }
+
+            function parseValueWithNewlines(str) {
+                const r = parseMultiColorValue(str, null, true);
+                if (!r.ok) return r;
+                const full = r.value.map(s => s.text).join('');
+                return ok(full);
+            }
+
+            /* ============ Exec-mode format parsers ============ */
+
+            // Parses: "prompt"-color["c"]-"opt1"=(cmd1)-"opt2"=(cmd2)...
+            function parseChooseExecFormat(str) {
+                const promptTokens = [];
+                const options = [];
+                let i = 0;
+                let scanningPrompt = true;
+
+                while (i < str.length) {
+                    while (i < str.length && /\s/.test(str[i])) i++;
+                    if (i >= str.length) break;
+
+                    if (str[i] === '"') {
+                        let j = i + 1;
+                        while (j < str.length && str[j] !== '"') j++;
+                        if (j >= str.length) return fail('unterminated string');
+                        const content = str.slice(i + 1, j);
+
+                        let k = j + 1;
+                        while (k < str.length && /\s/.test(str[k])) k++;
+                        if (k < str.length && str[k] === '=' && scanningPrompt) {
+                            // option entry
+                            k++;
+                            while (k < str.length && /\s/.test(str[k])) k++;
+                            if (k >= str.length || str[k] !== '(') {
+                                return fail('expected "(" after "=" for option "' + content + '"');
+                            }
+                            const paren = extractParenthesized(str, k);
+                            if (!paren) return fail('missing ")" in option command');
+                            options.push({ name: content, cmd: paren.content });
+                            i = paren.endPos;
+                            scanningPrompt = false;
+                            continue;
+                        }
+                        if (scanningPrompt) {
+                            promptTokens.push({ type: 'string', value: content });
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+
+                    if (str[i] === '-') {
+                        i++;
+                        while (i < str.length && /\s/.test(str[i])) i++;
+
+                        const colorMatch = str.slice(i).match(/^color\s*\[\s*"([^"]+)"\s*\]/i);
+                        if (colorMatch) {
+                            const ce = colorError(colorMatch[1]);
+                            if (ce) return fail(ce);
+                            if (scanningPrompt) promptTokens.push({ type: 'color', value: colorMatch[1] });
+                            i += colorMatch[0].length;
+                            continue;
+                        }
+                        const nrMatch = str.slice(i).match(/^nr-/i);
+                        if (nrMatch) {
+                            if (scanningPrompt) promptTokens.push({ type: 'newline-reset' });
+                            i += nrMatch[0].length;
+                            continue;
+                        }
+                        const nMatch = str.slice(i).match(/^n-/i);
+                        if (nMatch) {
+                            if (scanningPrompt) promptTokens.push({ type: 'newline' });
+                            i += nMatch[0].length;
+                            continue;
+                        }
+                        const rMatch = str.slice(i).match(/^r-/i);
+                        if (rMatch) {
+                            if (scanningPrompt) promptTokens.push({ type: 'reset' });
+                            i += rMatch[0].length;
+                            continue;
+                        }
+                        // plain dash
+                        continue;
+                    }
+
+                    return fail('unexpected character "' + str[i] + '"');
+                }
+
+                if (options.length === 0) return fail('no options specified');
+                return ok({ promptTokens, options });
+            }
+
+            // Parses: "prompt"-color["c"]-time["N"]"key"=(cmd)-time["N"]"key"=(cmd)...
+            function parseLongPressExecFormat(str) {
+                const promptTokens = [];
+                const entries = [];
+                let i = 0;
+                let scanningPrompt = true;
+
+                while (i < str.length) {
+                    while (i < str.length && /\s/.test(str[i])) i++;
+                    if (i >= str.length) break;
+
+                    if (str[i] === '-') {
+                        i++;
+                        while (i < str.length && /\s/.test(str[i])) i++;
+
+                        const timeMatch = str.slice(i).match(/^time\s*\[\s*"(\d+)"\s*\]\s*/i);
+                        if (timeMatch) {
+                            const timeSec = parseInt(timeMatch[1], 10);
+                            i += timeMatch[0].length;
+
+                            if (i >= str.length || str[i] !== '"') {
+                                return fail('expected key in quotes after time[...]');
+                            }
+                            let j = i + 1;
+                            while (j < str.length && str[j] !== '"') j++;
+                            if (j >= str.length) return fail('unterminated key');
+                            const key = str.slice(i + 1, j);
+                            i = j + 1;
+                            if (key.length !== 1) {
+                                return fail('key must be a single character, got "' + key + '"');
+                            }
+
+                            while (i < str.length && /\s/.test(str[i])) i++;
+                            if (i >= str.length || str[i] !== '=') {
+                                return fail('expected "=" after key "' + key + '"');
+                            }
+                            i++;
+                            while (i < str.length && /\s/.test(str[i])) i++;
+                            if (i >= str.length || str[i] !== '(') {
+                                return fail('expected "(" after "=" for key "' + key + '"');
+                            }
+                            const paren = extractParenthesized(str, i);
+                            if (!paren) return fail('missing ")" in command');
+                            entries.push({ key, time: timeSec, cmd: paren.content });
+                            i = paren.endPos;
+                            scanningPrompt = false;
+                            continue;
+                        }
+
+                        const colorMatch = str.slice(i).match(/^color\s*\[\s*"([^"]+)"\s*\]/i);
+                        if (colorMatch) {
+                            const ce = colorError(colorMatch[1]);
+                            if (ce) return fail(ce);
+                            if (scanningPrompt) promptTokens.push({ type: 'color', value: colorMatch[1] });
+                            i += colorMatch[0].length;
+                            continue;
+                        }
+                        const nrMatch = str.slice(i).match(/^nr-/i);
+                        if (nrMatch) {
+                            if (scanningPrompt) promptTokens.push({ type: 'newline-reset' });
+                            i += nrMatch[0].length;
+                            continue;
+                        }
+                        const nMatch = str.slice(i).match(/^n-/i);
+                        if (nMatch) {
+                            if (scanningPrompt) promptTokens.push({ type: 'newline' });
+                            i += nMatch[0].length;
+                            continue;
+                        }
+                        const rMatch = str.slice(i).match(/^r-/i);
+                        if (rMatch) {
+                            if (scanningPrompt) promptTokens.push({ type: 'reset' });
+                            i += rMatch[0].length;
+                            continue;
+                        }
+                        continue;
+                    }
+
+                    if (str[i] === '"') {
+                        let j = i + 1;
+                        while (j < str.length && str[j] !== '"') j++;
+                        if (j >= str.length) return fail('unterminated string');
+                        const content = str.slice(i + 1, j);
+                        if (scanningPrompt) {
+                            promptTokens.push({ type: 'string', value: content });
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+
+                    return fail('unexpected character "' + str[i] + '"');
+                }
+
+                if (entries.length === 0) return fail('no time entries specified');
+                return ok({ promptTokens, entries });
+            }
+
+            function evaluatePureConcatenation(expr) {
+                const trimmed = expr.trim();
+                if (trimmed === '') return fail('empty expression');
+                const varRegex = /\[\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\]/g;
+                let refMatch;
+                const anyVarRef = /\[\s*"([^"]*)"\s*\]/g;
+                while ((refMatch = anyVarRef.exec(trimmed)) !== null) {
+                    const nameErr = varNameError(refMatch[1]);
+                    if (nameErr) return fail('invalid variable reference ' + refMatch[0] + ': ' + nameErr);
+                }
+                let m;
+                varRegex.lastIndex = 0;
+                while ((m = varRegex.exec(trimmed)) !== null) {
+                    if (!Object.prototype.hasOwnProperty.call(variables, m[1])) {
+                        return fail('variable "' + m[1] + '" not found');
+                    }
+                }
+                varRegex.lastIndex = 0;
+                const stripped = trimmed.replace(varRegex, '');
+                if (/[-*/^!]/.test(stripped)) {
+                    return fail('number[concatenation] only supports "+" concatenation and ["varName"] substitution');
+                }
+                const parts = trimmed.includes('+') ? trimmed.split('+') : [trimmed];
+                let resultStr = '';
+                for (let part of parts) {
+                    part = part.trim();
+                    if (part === '') continue;
+                    resultStr += part.replace(varRegex, (_, name) => String(variables[name].value));
+                }
+                return ok(resultStr);
+            }
+
+            function evaluateModulo(expr) {
+                const parts = expr.split('/');
+                if (parts.length !== 2) return fail('modulo expects one "/", e.g. "12/5"');
+                const left = parts[0].trim(), right = parts[1].trim();
+                if (left === '' || right === '') return fail('modulo: both sides must be non-empty');
+                const lr = evaluateComputation(left); if (!lr.ok) return lr;
+                const rr = evaluateComputation(right); if (!rr.ok) return rr;
+                const a = parseFloat(lr.value), b = parseFloat(rr.value);
+                if (isNaN(a)) return fail('modulo: left operand is not a number');
+                if (isNaN(b)) return fail('modulo: right operand is not a number');
+                if (b === 0) return fail('modulo: division by zero');
+                const q = Math.floor(a / b);
+                return ok(q + '......' + (a - q * b));
+            }
+
+            function evaluateRound(expr) {
+                const r = evaluateComputation(expr);
+                if (!r.ok) return r;
+                const num = parseFloat(r.value);
+                if (isNaN(num)) return fail('round: did not produce a number');
+                return ok(String(Math.round(num)));
+            }
+
+            function evaluateComputation(expr) {
+                const trimmed = expr.trim();
+                if (trimmed === '') return fail('empty expression');
+                const varRegex = /\[\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\]/g;
+                let refMatch;
+                const anyVarRef = /\[\s*"([^"]*)"\s*\]/g;
+                while ((refMatch = anyVarRef.exec(trimmed)) !== null) {
+                    const nameErr = varNameError(refMatch[1]);
+                    if (nameErr) return fail('invalid variable reference ' + refMatch[0] + ': ' + nameErr);
+                }
+                let hasTextVar = false, hasNumberVar = false;
+                const matches = [...trimmed.matchAll(varRegex)];
+                for (const match of matches) {
+                    const name = match[1];
+                    if (!Object.prototype.hasOwnProperty.call(variables, name)) return fail('variable "' + name + '" not found');
+                    if (variables[name].type === 'text') hasTextVar = true;
+                    else hasNumberVar = true;
+                }
+                if (hasTextVar && hasNumberVar) return fail('cannot mix text and number variables');
+                const stripped = trimmed.replace(varRegex, '');
+                const hasLettersOutsideVars = /[A-Za-z]/.test(stripped.replace(/sqrt/gi, ''));
+
+                if (hasTextVar || hasLettersOutsideVars) {
+                    if (/[-*/^!]/.test(stripped)) return fail('text expressions only support "+" concatenation');
+                    const parts = trimmed.includes('+') ? trimmed.split('+') : [trimmed];
+                    let resultStr = '';
+                    for (let part of parts) {
+                        part = part.trim();
+                        if (part === '') continue;
+                        const pureVarMatch = part.match(/^\[\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\]$/);
+                        if (pureVarMatch) {
+                            const name = pureVarMatch[1];
+                            if (variables[name].type !== 'text') return fail('variable "' + name + '" is not text');
+                            resultStr += variables[name].value;
+                        } else {
+                            let hasError = false, errorMsg = '';
+                            const replacedPart = part.replace(varRegex, (m, name) => {
+                                if (!variables[name]) { hasError = true; errorMsg = 'variable "' + name + '" not found'; return m; }
+                                if (variables[name].type !== 'text') { hasError = true; errorMsg = 'variable "' + name + '" is not text'; return m; }
+                                return variables[name].value;
+                            });
+                            if (hasError) return fail(errorMsg);
+                            resultStr += replacedPart;
+                        }
+                    }
+                    return ok(resultStr);
+                }
+
+                let evalExpr = trimmed;
+                evalExpr = evalExpr.replace(/sqrt\(/gi, 'Math.sqrt(');
+                evalExpr = evalExpr.replace(varRegex, (m, name) => {
+                    if (!variables[name] || variables[name].type !== 'number') return 'NaN';
+                    return variables[name].value;
+                });
+                if (/\.\d+!/.test(evalExpr)) return fail('factorial "!" requires an integer');
+                evalExpr = evalExpr.replace(/(\d+)!/g, 'factorial($1)');
+                evalExpr = evalExpr.replace(/\^/g, '**');
+                const lettersCheck = evalExpr.replace(/Math\.sqrt/g, '').replace(/factorial/g, '');
+                if (/[A-Za-z]/.test(lettersCheck)) {
+                    const bad = lettersCheck.match(/[A-Za-z]+/)[0];
+                    return fail('unknown identifier "' + bad + '"');
+                }
+                if (/[&|<>?:]/.test(evalExpr)) return fail('unsupported operator');
+                if (/[[\]]/.test(evalExpr)) return fail('invalid variable reference');
+                try {
+                    const fn = new Function('factorial', '"use strict"; return (' + evalExpr + ')');
+                    const result = fn(factorial);
+                    if (typeof result !== 'number') return fail('expression did not evaluate to a number');
+                    if (Number.isNaN(result)) return fail('expression evaluated to NaN');
+                    if (!isFinite(result)) return fail('expression evaluated to Infinity');
+                    return ok(formatNumber(result));
+                } catch (e) { return fail('cannot evaluate expression: ' + e.message); }
+            }
+
+            function executeSequentialCommands(subcommands) {
+                let index = 0;
+                function executeNext() {
+                    if (index >= subcommands.length) { render(); return; }
+                    const cmd = subcommands[index];
+                    const timeMatch = cmd.match(/^time\s*(?:"(\d+)"|\[\s*"([^"]+)"\s*\])\s*-\s*(.*)$/i);
+                    if (timeMatch) {
+                        let delay; let okDelay = true;
+                        if (timeMatch[1]) delay = parseInt(timeMatch[1], 10);
+                        else {
+                            const varName = timeMatch[2];
+                            if (!variables[varName]) { outputLines.push(err('time: variable "' + varName + '" not found')); okDelay = false; }
+                            else if (variables[varName].type !== 'number') { outputLines.push(err('time: variable is not number')); okDelay = false; }
+                            else { delay = variables[varName].value;
+                                if (!Number.isInteger(delay) || delay < 0) { outputLines.push(err('time: delay must be non-negative integer')); okDelay = false; } }
+                        }
+                        const innerCmd = timeMatch[3].trim();
+                        if (okDelay && innerCmd === '') { outputLines.push(err('time: missing command')); okDelay = false; }
+                        if (!okDelay) { index++; executeNext(); return; }
+                        setTimeout(() => {
+                            const output = processCommand(innerCmd, true);
+                            if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                            index++;
+                            executeNext();
+                        }, delay * 1000);
+                    } else {
+                        const output = processCommand(cmd, true);
+                        if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                        index++;
+                        executeNext();
+                    }
+                }
+                executeNext();
+            }
+
+            /* ============ Long-press helpers ============ */
+
+            const IGNORED_KEYS = new Set([
+                'Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Tab',
+                'Escape', 'Enter', 'Backspace', 'Delete', 'Insert',
+                'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+                'Home', 'End', 'PageUp', 'PageDown',
+                'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12'
+            ]);
+
+            function finishLongPress() {
+                if (pendingInput && (pendingInput.kind === 'long-press' || pendingInput.kind === 'long-press-exec')) {
+                    if (pendingInput.timers && pendingInput.timers.length) {
+                        for (const t of pendingInput.timers) clearTimeout(t);
+                    }
+                    pendingInput = null;
+                    currentInput = '';
+                    hiddenInput.value = '';
+                    render();
+                }
+            }
+
+            function handleLongPressDown(key) {
+                const p = pendingInput;
+                if (!p || (p.kind !== 'long-press' && p.kind !== 'long-press-exec')) return;
+                if (p.pressedKey !== null) return;
+                if (IGNORED_KEYS.has(key)) return;
+                if (key.length !== 1) return;
+
+                p.pressedKey = key;
+                p.timers = [];
+                render();
+
+                if (!Object.prototype.hasOwnProperty.call(p.keyMap, key)) {
+                    outputLines.push('<span class="hint-msg">That option does not exist. Please enter a valid option.</span>');
+                    render();
+                    return;
+                }
+
+                const entries = p.keyMap[key];
+                p.timers = entries.map(e => setTimeout(() => {
+                    if (pendingInput !== p) return;
+                    if (p.pressedKey !== key) return;
+                    if (p.kind === 'long-press') {
+                        if (p.type === 'text') {
+                            variables[p.varName] = { type: 'text', value: e.value };
+                        } else {
+                            const num = parseFloat(e.value);
+                            variables[p.varName] = { type: 'number', value: isNaN(num) ? 0 : num };
+                        }
+                        if (p.color) variables[p.varName].color = p.color;
+                    } else if (p.kind === 'long-press-exec') {
+                        const output = processCommand(e.cmd, true);
+                        if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                    }
+                    p.triggered = true;
+                    render();
+                }, e.time * 1000));
+            }
+
+            function handleLongPressUp(key) {
+                const p = pendingInput;
+                if (!p || (p.kind !== 'long-press' && p.kind !== 'long-press-exec')) return;
+                if (p.pressedKey !== key) return;
+
+                if (p.timers && p.timers.length) {
+                    for (const t of p.timers) clearTimeout(t);
+                }
+                p.timers = [];
+                const wasTriggered = !!p.triggered;
+                p.pressedKey = null;
+                p.triggered = false;
+
+                if (wasTriggered) {
+                    finishLongPress();
+                } else {
+                    render();
+                }
+            }
+
+            /* ============ Main command processor ============ */
+
+            function processCommand(input, skipDisplayCommand = false) {
+                input = sanitizeAscii(input.trim());
+                if (input === '') return '';
+
+                const cmdMatch = input.match(/^(text-color|number-color|text|number|computation|clear|variable-color|variable-type|variable-delete|variable-rename|variable-replace|variable|cs-help|time|random-number|random-text|random|repeat|help|if|length|input-choose|input|run|while|save|load|functional-rename|functional-delete|functional-replace|functional|list-add|list-delete|list-rename|list-replace|list)\s*(.*)$/i);
+                if (!cmdMatch) {
+                    const word = input.split(/\s+/)[0];
+                    return err('unknown command "' + word + '". Type "help" or "cs-help" for commands.');
+                }
+                const command = cmdMatch[1].toLowerCase();
+                const rest = cmdMatch[2].trim();
+
+                if (command === 'clear') { outputLines = []; render(); return ''; }
+                if (command === 'cs-help' || command === 'help') return CS_HELP_TEXT;
+
+                /* --------- random-number / random-text --------- */
+                if (command === 'random-number') {
+                    const match = rest.match(/^"(-?\d+)"\s*-\s*"(-?\d+)"\s*$/);
+                    if (!match) return err('random-number: Usage: random-number"min"-"max"');
+                    const min = parseInt(match[1], 10), max = parseInt(match[2], 10);
+                    if (min > max) return err('random-number: lower > upper');
+                    return String(Math.floor(Math.random() * (max - min + 1)) + min);
+                }
+                if (command === 'random-text') {
+                    const params = [];
+                    const ms = rest.match(/"([^"]*)"/g);
+                    if (ms) for (const m of ms) params.push(m.slice(1, -1));
+                    if (params.length < 2) return err('random-text: need at least 2 quoted args');
+                    return params[Math.floor(Math.random() * params.length)];
+                }
+
+                /* --------- variable-color --------- */
+                if (command === 'variable-color') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-\s*color\s*\[\s*"([^"]+)"\s*\]\s*$/i);
+                    if (!match) return err('variable-color: Usage: variable-color["name"]-color["colorName"]');
+                    const nameErr = varNameError(match[1]);
+                    if (nameErr) return err('variable-color: ' + nameErr);
+                    const ce = colorError(match[2]);
+                    if (ce) return err('variable-color: ' + ce);
+                    if (!variables[match[1]]) return err('variable-color: variable "' + match[1] + '" not found');
+                    variables[match[1]].color = match[2];
+                    delete variables[match[1]].segments;
+                    return '';
+                }
+
+                /* --------- variable-type --------- */
+                if (command === 'variable-type') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-\s*(text|number)\s*$/i);
+                    if (!match) return err('variable-type: Usage: variable-type["name"]-text|number');
+                    const nameErr = varNameError(match[1]);
+                    if (nameErr) return err('variable-type: ' + nameErr);
+                    if (!variables[match[1]]) return err('variable-type: variable "' + match[1] + '" not found');
+                    const v = variables[match[1]];
+                    const targetType = match[2].toLowerCase();
+                    if (v.type === targetType) return '';
+                    if (targetType === 'number') {
+                        const strVal = String(v.value).trim();
+                        if (!isValidNumber(strVal)) return err('variable-type: cannot convert to number');
+                        const newVar = { type: 'number', value: parseFloat(strVal) };
+                        if (v.color) newVar.color = v.color;
+                        if (v.segments) newVar.segments = v.segments;
+                        variables[match[1]] = newVar;
+                    } else {
+                        let formatted;
+                        if (typeof v.value === 'string') formatted = v.value;
+                        else { formatted = formatNumber(v.value); if (formatted === null) return err('variable-type: invalid number'); }
+                        const newVar = { type: 'text', value: formatted };
+                        if (v.color) newVar.color = v.color;
+                        if (v.segments) newVar.segments = v.segments;
+                        variables[match[1]] = newVar;
+                    }
+                    return '';
+                }
+
+                /* --------- variable --------- */
+                if (command === 'variable') {
+                    if (rest !== '') return err('variable: takes no arguments');
+                    if (Object.keys(variables).length === 0) return hint('(no variables defined)');
+                    let result = '';
+                    for (const name in variables) {
+                        const v = variables[name];
+                        const colorInfo = v.color ? '  [color: ' + v.color + ']' : '';
+                        result += v.type + ': ' + name + ' = ' + v.value + colorInfo + '\n';
+                    }
+                    return result.replace(/\n$/, '');
+                }
+
+                /* --------- variable-delete --------- */
+                if (command === 'variable-delete') {
+                    let param = rest.trim();
+                    if (param === '') return err('variable-delete: Usage: variable-delete "name" or =all');
+                    if (param.toLowerCase() === '=all') { variables = {}; return ''; }
+                    if (param.startsWith('=')) param = param.substring(1).trim();
+                    if (param.startsWith('"') && param.endsWith('"')) param = param.slice(1, -1);
+                    const nameErr = varNameError(param);
+                    if (nameErr) return err('variable-delete: ' + nameErr);
+                    if (!variables[param]) return err('variable-delete: variable "' + param + '" not found');
+                    delete variables[param];
+                    return '';
+                }
+
+                /* --------- variable-rename --------- */
+                if (command === 'variable-rename') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
+                    if (!match) return err('variable-rename: Usage: variable-rename["old"]"new"');
+                    const nameErr1 = varNameError(match[1]);
+                    if (nameErr1) return err('variable-rename: ' + nameErr1);
+                    const nameErr2 = varNameError(match[2]);
+                    if (nameErr2) return err('variable-rename: ' + nameErr2);
+                    if (!variables[match[1]]) return err('variable-rename: variable "' + match[1] + '" not found');
+                    if (variables[match[2]]) return err('variable-rename: variable "' + match[2] + '" already exists');
+                    variables[match[2]] = variables[match[1]];
+                    delete variables[match[1]];
+                    return '';
+                }
+
+                /* --------- variable-replace --------- */
+                if (command === 'variable-replace') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*([\s\S]+)$/);
+                    if (!match) return err('variable-replace: Usage: variable-replace["name"]"newValue"');
+                    const nameErr = varNameError(match[1]);
+                    if (nameErr) return err('variable-replace: ' + nameErr);
+                    if (!variables[match[1]]) return err('variable-replace: variable "' + match[1] + '" not found');
+                    const parsed = parseValueWithNewlines(match[2].trim());
+                    if (!parsed.ok) return err('variable-replace: ' + parsed.error);
+                    const originalType = variables[match[1]].type;
+                    if (originalType === 'text') {
+                        variables[match[1]].value = parsed.value;
+                        delete variables[match[1]].segments;
+                    } else if (originalType === 'number') {
+                        if (parsed.value.includes('\n')) {
+                            variables[match[1]].value = parsed.value;
+                            delete variables[match[1]].segments;
+                        } else {
+                            if (!isValidNumber(parsed.value)) return err('variable-replace: not a valid number');
+                            variables[match[1]].value = parseFloat(parsed.value);
+                            delete variables[match[1]].segments;
+                        }
+                    }
+                    return '';
+                }
+
+                /* --------- length --------- */
+                if (command === 'length') {
+                    const listLenMatch = rest.match(/^\[\s*list\s*\]\s*-\s*\[\s*"([^"]+)"\s*\]\s*(?:"([^"]*)")?\s*$/i);
+                    if (listLenMatch) {
+                        const listName = listLenMatch[1], itemName = listLenMatch[2];
+                        if (!lists[listName]) return err('length: list "' + listName + '" not found');
+                        if (itemName === undefined) return String(Object.keys(lists[listName]).length);
+                        if (!lists[listName].hasOwnProperty(itemName)) return err('length: item "' + itemName + '" not found');
+                        return String(lists[listName][itemName].length);
+                    }
+                    const funcLenMatch = rest.match(/^\[\s*functional\s*\]\s*-\s*\[\s*"([^"]+)"\s*\]\s*(?:-\s*(\d+))?\s*$/i);
+                    if (funcLenMatch) {
+                        const funcName = funcLenMatch[1], idxStr = funcLenMatch[2];
+                        if (!functions[funcName]) return err('length: function "' + funcName + '" not found');
+                        const cmds = functions[funcName];
+                        if (idxStr === undefined) return String(cmds.length);
+                        const idx = parseInt(idxStr, 10);
+                        if (idx < 1 || idx > cmds.length) return err('length: index out of range');
+                        return String(cmds[idx - 1].length);
+                    }
+                    if (rest.startsWith('"')) {
+                        const m = rest.match(/^"([^"]*)"\s*$/);
+                        if (!m) return err('length: unterminated string');
+                        return String(m[1].length);
+                    }
+                    if (rest.startsWith('[')) {
+                        const m = rest.match(/^\[\s*"([^"]+)"\s*\]\s*$/);
+                        if (!m) return err('length: invalid variable ref');
+                        const nameErr = varNameError(m[1]);
+                        if (nameErr) return err('length: ' + nameErr);
+                        if (!variables[m[1]]) return err('length: variable not found');
+                        if (variables[m[1]].type !== 'text') return err('length: only works on text');
+                        return String(variables[m[1]].value.length);
+                    }
+                    return err('length: bad syntax');
+                }
+
+                /* --------- input-choose (all modes) --------- */
+                if (command === 'input-choose') {
+                    // ----- LONG-PRESS -----
+                    const lpMatch = rest.match(/^\[\s*long-press\s*\]([\s\S]*)$/i);
+                    if (lpMatch) {
+                        let remaining = lpMatch[1].trim();
+
+                        // Old storage mode: -["varName"]-type"prompt"-time["N"]"key"="value"
+                        if (/^-\s*\[\s*"/.test(remaining)) {
+                            const vnMatch = remaining.match(/^-\s*\[\s*"([^"]+)"\s*\]\s*/);
+                            const varName = vnMatch[1];
+                            remaining = remaining.substring(vnMatch[0].length).trim();
+
+                            const nameErr = varNameError(varName);
+                            if (nameErr) return err('input-choose[long-press]: ' + nameErr);
+                            if (variables[varName]) return err('input-choose[long-press]: variable "' + varName + '" already exists');
+
+                            let varColor = null;
+                            const colorFirstMatch = remaining.match(/^-color\s*\[\s*"([^"]+)"\s*\]\s*/i);
+                            if (colorFirstMatch) {
+                                varColor = colorFirstMatch[1];
+                                const ce = colorError(varColor);
+                                if (ce) return err('input-choose[long-press]: ' + ce);
+                                remaining = remaining.substring(colorFirstMatch[0].length).trim();
+                            }
+
+                            const typeMatch = remaining.match(/^-?\s*(text|number)\s*/i);
+                            if (!typeMatch) return err('input-choose[long-press]: missing type (text or number)');
+                            const type = typeMatch[1].toLowerCase();
+                            remaining = remaining.substring(typeMatch[0].length);
+
+                            const timeStartMatch = remaining.match(/^([\s\S]*?)(-\s*time\s*\[[\s\S]*)$/i);
+                            if (!timeStartMatch) {
+                                return err('input-choose[long-press]: expected at least one -time["N"]"key"="value" entry');
+                            }
+                            const promptExpr = timeStartMatch[1].trim();
+                            remaining = timeStartMatch[2];
+
+                            let promptSegments = [];
+                            if (promptExpr !== '') {
+                                const pr = parseMultiColorValue(promptExpr, varColor, true);
+                                if (!pr.ok) return err('input-choose[long-press]: ' + pr.error);
+                                promptSegments = pr.value;
+                            }
+
+                            const entries = [];
+                            while (remaining.length > 0) {
+                                remaining = remaining.replace(/^\s+/, '');
+                                if (remaining === '') break;
+                                const tm = remaining.match(/^-\s*time\s*\[\s*"(\d+)"\s*\]\s*"([^"]*)"\s*=\s*"([^"]*)"\s*/i);
+                                if (!tm) {
+                                    return err('input-choose[long-press]: expected -time["N"]"key"="value", got "' +
+                                        remaining.substring(0, 20) + '"');
+                                }
+                                const timeSec = parseInt(tm[1], 10);
+                                const key = tm[2];
+                                const value = tm[3];
+                                if (key.length !== 1) {
+                                    return err('input-choose[long-press]: key must be a single character, got "' + key + '"');
+                                }
+                                if (!Number.isInteger(timeSec) || timeSec <= 0) {
+                                    return err('input-choose[long-press]: time must be a positive integer, got "' + tm[1] + '"');
+                                }
+                                entries.push({ key, time: timeSec, value });
+                                remaining = remaining.substring(tm[0].length);
+                            }
+
+                            if (entries.length === 0) {
+                                return err('input-choose[long-press]: no time entries specified');
+                            }
+                            if (type === 'number') {
+                                for (const e of entries) {
+                                    if (!isValidNumber(e.value)) {
+                                        return err('input-choose[long-press]: value "' + e.value +
+                                            '" for key "' + e.key + '" is not a valid number');
+                                    }
+                                }
+                            }
+
+                            const keyMap = {};
+                            for (const e of entries) {
+                                if (!Object.prototype.hasOwnProperty.call(keyMap, e.key)) keyMap[e.key] = [];
+                                keyMap[e.key].push({ time: e.time, value: e.value });
+                            }
+                            for (const k in keyMap) keyMap[k].sort((a, b) => a.time - b.time);
+
+                            pendingInput = {
+                                kind: 'long-press',
+                                varName: varName,
+                                type: type,
+                                color: varColor,
+                                keyMap: keyMap,
+                                pressedKey: null,
+                                timers: [],
+                                triggered: false
+                            };
+
+                            if (promptSegments.length > 0) outputLines.push(renderSegments(promptSegments));
+                            render();
+                            return '';
+                        }
+
+                        // New exec mode: "prompt"-time["N"]"key"=(cmd)
+                        const r = parseLongPressExecFormat(remaining);
+                        if (!r.ok) return err('input-choose[long-press]: ' + r.error);
+                        const promptSegments = promptTokensToSegments(r.value.promptTokens);
+                        const entries = r.value.entries;
+
+                        const keyMap = {};
+                        for (const e of entries) {
+                            if (!Object.prototype.hasOwnProperty.call(keyMap, e.key)) keyMap[e.key] = [];
+                            keyMap[e.key].push({ time: e.time, cmd: e.cmd });
+                        }
+                        for (const k in keyMap) keyMap[k].sort((a, b) => a.time - b.time);
+
+                        pendingInput = {
+                            kind: 'long-press-exec',
+                            keyMap: keyMap,
+                            pressedKey: null,
+                            timers: [],
+                            triggered: false
+                        };
+
+                        if (promptSegments.length > 0) outputLines.push(renderSegments(promptSegments));
+                        render();
+                        return '';
+                    }
+
+                    // ----- REGULAR -----
+                    // New exec mode: input-choose"prompt"-"opt"=(cmd)
+                    if (!rest.startsWith('[')) {
+                        const r = parseChooseExecFormat(rest);
+                        if (!r.ok) return err('input-choose: ' + r.error);
+                        const promptSegments = promptTokensToSegments(r.value.promptTokens);
+                        const options = r.value.options;
+
+                        pendingInput = {
+                            kind: 'choose-exec',
+                            options: options
+                        };
+
+                        if (promptSegments.length > 0) outputLines.push(renderSegments(promptSegments));
+                        render();
+                        return '';
+                    }
+
+                    // Old storage mode: input-choose["var"]-type"prompt"-"opt"="value"
+                    const headerMatch = rest.match(/^\[\s*"([^"]+)"\s*\]([\s\S]*)$/);
+                    if (!headerMatch) return err('input-choose: Usage: input-choose["var"]-type"prompt"-"opt"="val"...');
+                    const varName = headerMatch[1];
+                    let remaining = headerMatch[2].trim();
+
+                    const nameErr = varNameError(varName);
+                    if (nameErr) return err('input-choose: ' + nameErr);
+                    if (variables[varName]) return err('input-choose: variable "' + varName + '" already exists');
+
+                    let varColor = null;
+                    const colorFirstMatch = remaining.match(/^-color\s*\[\s*"([^"]+)"\s*\]\s*/i);
+                    if (colorFirstMatch) {
+                        varColor = colorFirstMatch[1];
+                        const ce = colorError(varColor);
+                        if (ce) return err('input-choose: ' + ce);
+                        remaining = remaining.substring(colorFirstMatch[0].length).trim();
+                    }
+
+                    const typeMatch = remaining.match(/^-?\s*(text|number)\s*/i);
+                    if (!typeMatch) return err('input-choose: missing type (text or number)');
+                    const type = typeMatch[1].toLowerCase();
+                    remaining = remaining.substring(typeMatch[0].length);
+
+                    const optStart = remaining.search(/-"[^"]+"\s*=\s*"/);
+                    let promptExpr = '', optionsExpr = '';
+                    if (optStart >= 0) {
+                        promptExpr = remaining.slice(0, optStart).trim();
+                        optionsExpr = remaining.slice(optStart);
+                    } else promptExpr = remaining.trim();
+
+                    let promptSegments = [];
+                    if (promptExpr !== '') {
+                        const pr = parseMultiColorValue(promptExpr, varColor, true);
+                        if (!pr.ok) return err('input-choose: ' + pr.error);
+                        promptSegments = pr.value;
+                    }
+
+                    const options = {};
+                    let oi = 0;
+                    while (oi < optionsExpr.length) {
+                        while (oi < optionsExpr.length && /\s/.test(optionsExpr[oi])) oi++;
+                        if (oi >= optionsExpr.length) break;
+                        if (optionsExpr[oi] !== '-') return err('input-choose: expected "-" before option');
+                        oi++;
+                        while (oi < optionsExpr.length && /\s/.test(optionsExpr[oi])) oi++;
+                        if (oi >= optionsExpr.length || optionsExpr[oi] !== '"') return err('input-choose: expected option name in quotes');
+                        let j = oi + 1;
+                        while (j < optionsExpr.length && optionsExpr[j] !== '"') j++;
+                        if (j >= optionsExpr.length) return err('input-choose: unterminated option name');
+                        const optName = optionsExpr.slice(oi + 1, j);
+                        oi = j + 1;
+                        while (oi < optionsExpr.length && /\s/.test(optionsExpr[oi])) oi++;
+                        if (oi >= optionsExpr.length || optionsExpr[oi] !== '=') return err('input-choose: expected "=" after option "' + optName + '"');
+                        oi++;
+                        while (oi < optionsExpr.length && /\s/.test(optionsExpr[oi])) oi++;
+                        if (oi >= optionsExpr.length || optionsExpr[oi] !== '"') return err('input-choose: expected value in quotes');
+                        j = oi + 1;
+                        while (j < optionsExpr.length && optionsExpr[j] !== '"') j++;
+                        if (j >= optionsExpr.length) return err('input-choose: unterminated option value');
+                        const optValue = optionsExpr.slice(oi + 1, j);
+                        oi = j + 1;
+                        if (options.hasOwnProperty(optName)) return err('input-choose: duplicate option "' + optName + '"');
+                        options[optName] = optValue;
+                    }
+                    if (Object.keys(options).length === 0) return err('input-choose: no options specified');
+                    if (type === 'number') {
+                        for (const optName in options) {
+                            if (!isValidNumber(options[optName])) {
+                                return err('input-choose: option "' + optName + '" value "' + options[optName] + '" is not a valid number');
+                            }
+                        }
+                    }
+
+                    pendingInput = {
+                        kind: 'choose',
+                        varName: varName,
+                        type: type,
+                        color: varColor,
+                        options: options
+                    };
+
+                    if (promptSegments.length > 0) outputLines.push(renderSegments(promptSegments));
+                    render();
+                    return '';
+                }
+
+                /* --------- input --------- */
+                if (command === 'input') {
+                    const varMatch = rest.match(/^\[\s*"([^"]+)"\s*\]([\s\S]*)$/);
+                    if (!varMatch) return err('input: Usage: input["var"]-text"prompt"');
+                    const varName = varMatch[1];
+                    let remaining = varMatch[2].trim();
+
+                    const nameErr = varNameError(varName);
+                    if (nameErr) return err('input: ' + nameErr);
+                    if (variables[varName]) return err('input: variable "' + varName + '" already exists');
+
+                    let varColor = null;
+                    const colorFirstMatch = remaining.match(/^-color\s*\[\s*"([^"]+)"\s*\]\s*/i);
+                    if (colorFirstMatch) {
+                        varColor = colorFirstMatch[1];
+                        const ce = colorError(varColor);
+                        if (ce) return err('input: ' + ce);
+                        remaining = remaining.substring(colorFirstMatch[0].length).trim();
+                    }
+
+                    const typeMatch = remaining.match(/^-?\s*(text|number)\s*/i);
+                    if (!typeMatch) {
+                        if (remaining === '') return err('input: missing type (text or number)');
+                        return err('input: expected "-text" or "-number"');
+                    }
+                    const type = typeMatch[1].toLowerCase();
+                    remaining = remaining.substring(typeMatch[0].length);
+
+                    let promptSegments = [];
+                    if (remaining.trim() !== '') {
+                        const pr = parseMultiColorValue(remaining, varColor, true);
+                        if (!pr.ok) return err('input: ' + pr.error);
+                        promptSegments = pr.value;
+                    }
+
+                    pendingInput = {
+                        kind: 'input',
+                        varName: varName,
+                        type: type,
+                        color: varColor
+                    };
+
+                    if (promptSegments.length > 0) outputLines.push(renderSegments(promptSegments));
+                    render();
+                    return '';
+                }
+
+                /* --------- save --------- */
+                if (command === 'save') {
+                    const match = rest.match(/^"([^"]+)"(?:\s*-\s*(xor))?\s*$/i);
+                    if (!match) return err('save: Usage: save"name" or save"name"-xor');
+                    const name = match[1];
+                    if (!name) return err('save: name cannot be empty');
+                    const encrypted = !!match[2];
+                    return saveToFile(name, encrypted);
+                }
+
+                /* --------- load --------- */
+                if (command === 'load') {
+                    if (rest !== '') return err('load: takes no arguments. Usage: load');
+                    setTimeout(() => openLoadDialog(), 10);
+                    return '';
+                }
+
+                /* --------- list family --------- */
+                if (command === 'list') {
+                    if (rest === '') {
+                        if (Object.keys(lists).length === 0) return hint('(no lists defined)');
+                        let result = '';
+                        for (const name in lists) {
+                            result += 'list: ' + name + '\n';
+                            for (const itemName in lists[name]) result += '  ' + itemName + ' = ' + lists[name][itemName] + '\n';
+                        }
+                        return result.replace(/\n$/, '');
+                    }
+                    const accessMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
+                    if (accessMatch) {
+                        const listName = accessMatch[1], itemName = accessMatch[2];
+                        if (!lists[listName]) return err('list: list "' + listName + '" not found');
+                        if (!lists[listName].hasOwnProperty(itemName)) return err('list: item "' + itemName + '" not found');
+                        return processCommand(lists[listName][itemName], true);
+                    }
+                    const createMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*(.*)$/i);
+                    if (!createMatch) return err('list: bad syntax');
+                    const listName = createMatch[1];
+                    let itemsPart = createMatch[2].trim();
+                    const nameErr = varNameError(listName);
+                    if (nameErr) return err('list: ' + nameErr);
+                    if (lists[listName]) return err('list: list already exists');
+                    if (itemsPart === '') { lists[listName] = {}; return ''; }
+                    const items = {};
+                    while (itemsPart.length > 0) {
+                        itemsPart = itemsPart.trim();
+                        if (!itemsPart.startsWith('-')) return err('list: expected "-"');
+                        itemsPart = itemsPart.substring(1).trim();
+                        const parenIndex = itemsPart.indexOf('(');
+                        if (parenIndex === -1) return err('list: bad item definition');
+                        const itemName = itemsPart.substring(0, parenIndex).trim();
+                        if (itemName === '') return err('list: item name empty');
+                        if (items.hasOwnProperty(itemName)) return err('list: duplicate item "' + itemName + '"');
+                        const pr = extractParenthesized(itemsPart, parenIndex);
+                        if (!pr) return err('list: missing ")"');
+                        items[itemName] = pr.content;
+                        itemsPart = itemsPart.substring(pr.endPos).trim();
+                    }
+                    lists[listName] = items; return '';
+                }
+                if (command === 'list-add') {
+                    const lMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*(.*)$/i);
+                    if (!lMatch) return err('list-add: bad syntax');
+                    const listName = lMatch[1];
+                    let remaining = lMatch[2].trim();
+                    if (!lists[listName]) return err('list-add: list not found');
+                    if (!remaining.startsWith('-')) return err('list-add: expected "-"');
+                    remaining = remaining.substring(1).trim();
+                    const parenIndex = remaining.indexOf('(');
+                    if (parenIndex === -1) return err('list-add: bad item');
+                    const itemName = remaining.substring(0, parenIndex).trim();
+                    if (itemName === '') return err('list-add: item name empty');
+                    if (lists[listName].hasOwnProperty(itemName)) return err('list-add: item exists');
+                    const pr = extractParenthesized(remaining, parenIndex);
+                    if (!pr) return err('list-add: missing ")"');
+                    const after = remaining.substring(pr.endPos).trim();
+                    if (after !== '') return err('list-add: trailing text');
+                    lists[listName][itemName] = pr.content; return '';
+                }
+                if (command === 'list-delete') {
+                    let param = rest.trim();
+                    if (param === '') return err('list-delete: missing arg');
+                    if (param.toLowerCase() === '=all') { lists = {}; return ''; }
+                    const allMatch = param.match(/^\[\s*"([^"]+)"\s*\]\s*=\s*all\s*$/i);
+                    if (allMatch) {
+                        if (!lists[allMatch[1]]) return err('list-delete: list not found');
+                        lists[allMatch[1]] = {}; return '';
+                    }
+                    const match = param.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
+                    if (!match) return err('list-delete: bad syntax');
+                    if (!lists[match[1]]) return err('list-delete: list not found');
+                    if (!lists[match[1]].hasOwnProperty(match[2])) return err('list-delete: item not found');
+                    delete lists[match[1]][match[2]]; return '';
+                }
+                if (command === 'list-rename') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
+                    if (!match) return err('list-rename: bad syntax');
+                    const nameErr1 = varNameError(match[1]);
+                    if (nameErr1) return err('list-rename: ' + nameErr1);
+                    const nameErr2 = varNameError(match[2]);
+                    if (nameErr2) return err('list-rename: ' + nameErr2);
+                    if (!lists[match[1]]) return err('list-rename: list not found');
+                    if (lists[match[2]]) return err('list-rename: target exists');
+                    lists[match[2]] = lists[match[1]];
+                    delete lists[match[1]]; return '';
+                }
+                if (command === 'list-replace') {
+                    const lMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*(.*)$/i);
+                    if (!lMatch) {
+                        return err('list-replace: bad syntax. Usage: list-replace["list"]-oldItem-newItem(newCmd)');
+                    }
+                    const listName = lMatch[1];
+                    let remaining = lMatch[2].trim();
+                    if (!lists[listName]) return err('list-replace: list "' + listName + '" not found');
+                    if (!remaining.startsWith('-')) {
+                        return err('list-replace: expected "-" before old item name. Usage: list-replace["list"]-oldItem-newItem(newCmd)');
+                    }
+                    remaining = remaining.substring(1).trim();
+
+                    const dashIdx = remaining.indexOf('-');
+                    if (dashIdx === -1) {
+                        return err('list-replace: expected "-" between old item and new item');
+                    }
+                    const oldName = remaining.substring(0, dashIdx).trim();
+                    if (oldName === '') {
+                        return err('list-replace: old item name cannot be empty');
+                    }
+                    remaining = remaining.substring(dashIdx + 1).trim();
+
+                    const parenIndex = remaining.indexOf('(');
+                    if (parenIndex === -1) {
+                        return err('list-replace: new item must look like newItemName(newCmd), e.g. -2(text"dsds")');
+                    }
+                    const newName = remaining.substring(0, parenIndex).trim();
+                    if (newName === '') {
+                        return err('list-replace: new item name cannot be empty');
+                    }
+                    const newP = extractParenthesized(remaining, parenIndex);
+                    if (!newP) {
+                        return err('list-replace: missing closing ")" for new item');
+                    }
+                    const newCmd = newP.content;
+                    const after = remaining.substring(newP.endPos).trim();
+                    if (after !== '') {
+                        return err('list-replace: unexpected trailing text "' + after + '"');
+                    }
+
+                    if (!lists[listName].hasOwnProperty(oldName)) {
+                        return err('list-replace: item "' + oldName + '" not found in list "' + listName + '"');
+                    }
+                    if (newName !== oldName && lists[listName].hasOwnProperty(newName)) {
+                        return err('list-replace: item "' + newName + '" already exists in list "' + listName + '"');
+                    }
+                    delete lists[listName][oldName];
+                    lists[listName][newName] = newCmd;
+                    return '';
+                }
+
+                /* --------- text --------- */
+                if (command === 'text') {
+                    const concatMatch = rest.match(/^\[\s*concatenation\s*\]\s*-?\s*"([\s\S]*)"\s*$/i);
+                    if (concatMatch) {
+                        const result = evaluateComputation(concatMatch[1]);
+                        if (!result.ok) return err('text[concatenation]: ' + result.error);
+                        return escapeHtml(result.value);
+                    }
+
+                    const varMatch = rest.match(/^\[\s*"([^"]+)"\s*\]([\s\S]*)$/);
+                    if (varMatch) {
+                        const varName = varMatch[1];
+                        const afterName = varMatch[2].trim();
+                        const nameErr = varNameError(varName);
+                        if (nameErr) return err('text: ' + nameErr);
+
+                        if (afterName === '') {
+                            if (!variables[varName]) return err('text: variable "' + varName + '" not found');
+                            if (variables[varName].type !== 'text') return err('text: variable is not text type');
+                            return renderVariable(variables[varName]);
+                        }
+
+                        if (variables[varName]) return err('text: variable "' + varName + '" already exists. Use variable-replace to change.');
+                        const pr = parseMultiColorValue(afterName, null, true);
+                        if (!pr.ok) return err('text: ' + pr.error);
+                        const bv = buildVariable('text', pr.value, true);
+                        if (!bv.ok) return err('text: ' + bv.error);
+                        variables[varName] = bv.value;
+                        return '';
+                    }
+
+                    if (rest.startsWith('"')) {
+                        const pr = parseMultiColorValue(rest, null, true);
+                        if (!pr.ok) return err('text: ' + pr.error);
+                        return renderSegments(pr.value);
+                    }
+                    return err('text: bad syntax');
+                }
+
+                /* --------- number --------- */
+                if (command === 'number') {
+                    const concatMatch = rest.match(/^\[\s*concatenation\s*\]\s*-?\s*"([\s\S]*)"\s*$/i);
+                    if (concatMatch) {
+                        const result = evaluatePureConcatenation(concatMatch[1]);
+                        if (!result.ok) return err('number[concatenation]: ' + result.error);
+                        if (!isValidNumber(result.value)) return err('number[concatenation]: not a valid number');
+                        return escapeHtml(formatNumber(parseFloat(result.value)));
+                    }
+
+                    const varMatch = rest.match(/^\[\s*"([^"]+)"\s*\]([\s\S]*)$/);
+                    if (varMatch) {
+                        const varName = varMatch[1];
+                        const afterName = varMatch[2].trim();
+                        const nameErr = varNameError(varName);
+                        if (nameErr) return err('number: ' + nameErr);
+
+                        if (afterName === '') {
+                            if (!variables[varName]) return err('number: variable "' + varName + '" not found');
+                            if (variables[varName].type !== 'number') return err('number: variable is not number type');
+                            return renderVariable(variables[varName]);
+                        }
+
+                        if (variables[varName]) return err('number: variable "' + varName + '" already exists. Use variable-replace to change.');
+                        const pr = parseMultiColorValue(afterName, null, false);
+                        if (!pr.ok) return err('number: ' + pr.error);
+                        const bv = buildVariable('number', pr.value, false);
+                        if (!bv.ok) return err('number: ' + bv.error);
+                        variables[varName] = bv.value;
+                        return '';
+                    }
+
+                    if (rest.startsWith('"')) {
+                        const pr = parseMultiColorValue(rest, null, false);
+                        if (!pr.ok) return err('number: ' + pr.error);
+                        const fullText = pr.value.map(s => s.text).join('');
+                        if (!isValidNumber(fullText)) return err('number: "' + fullText + '" is not a valid number');
+                        return renderSegments(pr.value);
+                    }
+                    return err('number: bad syntax');
+                }
+
+                /* --------- text-color --------- */
+                if (command === 'text-color') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*([\s\S]*)$/);
+                    if (!match) return err('text-color: Usage: text-color["color"]"text"');
+                    const ce = colorError(match[1]);
+                    if (ce) return err('text-color: ' + ce);
+                    const pr = parseMultiColorValue(match[2], match[1], true);
+                    if (!pr.ok) return err('text-color: ' + pr.error);
+                    return renderSegments(pr.value);
+                }
+
+                /* --------- number-color --------- */
+                if (command === 'number-color') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*([\s\S]*)$/);
+                    if (!match) return err('number-color: Usage: number-color["color"]"123"');
+                    const ce = colorError(match[1]);
+                    if (ce) return err('number-color: ' + ce);
+                    const pr = parseMultiColorValue(match[2], match[1], false);
+                    if (!pr.ok) return err('number-color: ' + pr.error);
+                    return renderSegments(pr.value);
+                }
+
+                /* --------- computation --------- */
+                if (command === 'computation') {
+                    let mainRest = rest;
+                    let colorName = null;
+                    const cs = rest.match(/^(.*?)\s*-\s*color\s*\[\s*"([^"]+)"\s*\]\s*$/i);
+                    if (cs) {
+                        mainRest = cs[1].trim();
+                        colorName = cs[2];
+                        const ce = colorError(colorName);
+                        if (ce) return err('computation: ' + ce);
+                    }
+                    const KNOWN_MODES = ['modulo', 'round', 'variable', 'variable-modulo', 'variable-round'];
+                    const modeMatch = mainRest.match(/^\[\s*([^\]]+)\s*\]\s*"([^"]*)"(?:\s*-\s*\[\s*"([^"]+)"\s*\])?\s*$/i);
+                    if (modeMatch) {
+                        const mode = modeMatch[1].trim().toLowerCase();
+                        const expr = modeMatch[2];
+                        const varName = modeMatch[3] || null;
+                        if (KNOWN_MODES.indexOf(mode) === -1) return err('computation: unknown mode');
+                        if (mode === 'modulo') {
+                            const r = evaluateModulo(expr);
+                            if (!r.ok) return err('computation: ' + r.error);
+                            return colorName ? '<span style="color: ' + COLOR_MAP[colorName] + '">' + escapeHtml(r.value) + '</span>' : r.value;
+                        }
+                        if (mode === 'round') {
+                            const r = evaluateRound(expr);
+                            if (!r.ok) return err('computation: ' + r.error);
+                            return colorName ? '<span style="color: ' + COLOR_MAP[colorName] + '">' + escapeHtml(r.value) + '</span>' : r.value;
+                        }
+                        if (mode === 'variable' || mode === 'variable-modulo' || mode === 'variable-round') {
+                            if (!varName) return err('computation: missing target variable');
+                            const ne = varNameError(varName);
+                            if (ne) return err('computation: ' + ne);
+                            let result;
+                            if (mode === 'variable') result = evaluateComputation(expr);
+                            else if (mode === 'variable-modulo') result = evaluateModulo(expr);
+                            else result = evaluateRound(expr);
+                            if (!result.ok) return err('computation: ' + result.error);
+                            if (mode === 'variable' && !isValidNumber(result.value)) {
+                                variables[varName] = { type: 'text', value: result.value };
+                            } else {
+                                variables[varName] = { type: 'number', value: parseFloat(result.value) };
+                            }
+                            if (colorName) variables[varName].color = colorName;
+                            return '';
+                        }
+                    }
+                    if (!mainRest.startsWith('"')) return err('computation: expression must be in quotes');
+                    const exprMatch = mainRest.match(/^"([^"]*)"\s*$/);
+                    if (!exprMatch) return err('computation: bad syntax');
+                    const result = evaluateComputation(exprMatch[1]);
+                    if (!result.ok) return err('computation: ' + result.error);
+                    return colorName ? '<span style="color: ' + COLOR_MAP[colorName] + '">' + escapeHtml(result.value) + '</span>' : escapeHtml(result.value);
+                }
+
+                /* --------- time --------- */
+                if (command === 'time') {
+                    let delay = null, innerCommand = null;
+                    const vtm = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-\s*(.*)$/i);
+                    if (vtm) {
+                        const nameErr = varNameError(vtm[1]);
+                        if (nameErr) return err('time: ' + nameErr);
+                        if (!variables[vtm[1]]) return err('time: variable "' + vtm[1] + '" not found');
+                        if (variables[vtm[1]].type !== 'number') return err('time: variable is not number');
+                        delay = variables[vtm[1]].value;
+                        innerCommand = vtm[2].trim();
+                        if (!Number.isInteger(delay) || delay < 0) return err('time: delay must be non-negative integer');
+                    } else {
+                        const lm = rest.match(/^"(\d+)"\s*-\s*(.*)$/i);
+                        if (lm) { delay = parseInt(lm[1], 10); innerCommand = lm[2].trim(); }
+                    }
+                    if (delay === null) return err('time: Usage: time"seconds"-command');
+                    if (innerCommand === '') return err('time: missing command');
+                    setTimeout(() => {
+                        if (!skipDisplayCommand) outputLines.push(PROMPT + innerCommand);
+                        const output = processCommand(innerCommand, true);
+                        if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                        render();
+                    }, delay * 1000);
+                    return 'Scheduled in ' + delay + 's: ' + innerCommand;
+                }
+
+                /* --------- run --------- */
+                if (command === 'run') {
+                    const subcommands = extractSubCommands(rest);
+                    if (subcommands.length === 0) return err('run: bad syntax');
+                    executeSequentialCommands(subcommands);
+                    return '';
+                }
+
+                /* --------- while --------- */
+                if (command === 'while') {
+                    const wm = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-(eq|ne|gt|lt|ge|le)\s*-?\s*\[\s*"([^"]+)"\s*\]\s*-\s*do\s*(.*)$/i);
+                    if (!wm) return err('while: bad syntax');
+                    const v1Name = wm[1], op = wm[2].toLowerCase(), v2Name = wm[3], doPart = wm[4].trim();
+                    let ne = varNameError(v1Name); if (ne) return err('while: ' + ne);
+                    ne = varNameError(v2Name); if (ne) return err('while: ' + ne);
+                    if (!variables[v1Name] || !variables[v2Name]) return err('while: variable not found');
+                    const subs = extractSubCommands(doPart);
+                    if (subs.length === 0) return err('while: -do(...) needs commands');
+                    if (variables[v1Name].type !== variables[v2Name].type) return err('while: cannot compare different types');
+
+                    function cond() {
+                        const a = variables[v1Name], b = variables[v2Name];
+                        if (a.type === 'number') {
+                            switch (op) {
+                                case 'eq': return a.value === b.value;
+                                case 'ne': return a.value !== b.value;
+                                case 'gt': return a.value > b.value;
+                                case 'lt': return a.value < b.value;
+                                case 'ge': return a.value >= b.value;
+                                case 'le': return a.value <= b.value;
+                            }
+                        } else {
+                            const l1 = String(a.value).length, l2 = String(b.value).length;
+                            switch (op) {
+                                case 'eq': return l1 === l2;
+                                case 'ne': return l1 !== l2;
+                                case 'gt': return l1 > l2;
+                                case 'lt': return l1 < l2;
+                                case 'ge': return l1 >= l2;
+                                case 'le': return l1 <= l2;
+                            }
+                        }
+                        return false;
+                    }
+                    function execBody(i) {
+                        if (i >= subs.length) return true;
+                        const output = processCommand(subs[i], true);
+                        if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                        return execBody(i + 1);
+                    }
+                    while (cond()) execBody(0);
+                    render();
+                    return '';
+                }
+
+                /* --------- random --------- */
+                if (command === 'random') {
+                    const trimmedRest = rest.trim();
+                    const textRandomMatch = trimmedRest.match(/^"(\d+)"\s*-\s*text\s*([\s\S]*)$/);
+                    if (textRandomMatch) {
+                        const count = parseInt(textRandomMatch[1], 10);
+                        const texts = [];
+                        const ms = textRandomMatch[2].match(/"([^"]*)"/g);
+                        if (ms) for (const m of ms) texts.push(m.slice(1, -1));
+                        if (texts.length === 0) return err('random: no texts');
+                        if (count <= 0) return err('random: count must be positive');
+                        if (count > texts.length) return err('random: count > texts');
+                        const idx = [...Array(texts.length).keys()];
+                        for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+                        return idx.slice(0, count).map(i => texts[i]).join('\n');
+                    }
+                    const numRandomMatch = trimmedRest.match(/^"(\d+)"\s*-\s*number\s*"(-?\d+)"\s*-\s*"(-?\d+)"\s*$/);
+                    if (numRandomMatch) {
+                        const count = parseInt(numRandomMatch[1], 10);
+                        const min = parseInt(numRandomMatch[2], 10), max = parseInt(numRandomMatch[3], 10);
+                        if (min > max) return err('random: min > max');
+                        const rangeSize = max - min + 1;
+                        if (count <= 0) return err('random: count must be positive');
+                        if (count > rangeSize) return err('random: count > range');
+                        const pool = []; for (let i = min; i <= max; i++) pool.push(i);
+                        for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+                        return pool.slice(0, count).join('\n');
+                    }
+                    const multiRM = trimmedRest.match(/^"(\d+)"\s*-\s*(\([\s\S]*)$/);
+                    if (multiRM) {
+                        const count = parseInt(multiRM[1], 10);
+                        const subs = extractSubCommands(multiRM[2].trim());
+                        if (subs.length === 0) return err('random: bad command list');
+                        if (count <= 0) return err('random: count must be positive');
+                        if (count > subs.length) return err('random: count > commands');
+                        const idx = [...Array(subs.length).keys()];
+                        for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+                        executeSequentialCommands(idx.slice(0, count).map(i => subs[i]));
+                        return '';
+                    }
+                    if (trimmedRest.startsWith('(')) {
+                        const subs = extractSubCommands(trimmedRest);
+                        if (subs.length === 0) return err('random: bad command list');
+                        return processCommand(subs[Math.floor(Math.random() * subs.length)], true);
+                    }
+                    if (rest.toLowerCase() === '-uuid') return generateUUID();
+                    const params = [];
+                    const ms = rest.match(/"([^"]*)"/g);
+                    if (ms) for (const m of ms) params.push(m.slice(1, -1));
+                    if (params.length < 2) return err('random: need at least 2 args');
+                    const allInts = params.every(p => /^-?\d+$/.test(p));
+                    if (params.length === 2 && allInts) {
+                        const min = parseInt(params[0], 10), max = parseInt(params[1], 10);
+                        if (min > max) return err('random: min > max');
+                        return String(Math.floor(Math.random() * (max - min + 1)) + min);
+                    }
+                    return params[Math.floor(Math.random() * params.length)];
+                }
+
+                /* --------- repeat --------- */
+                if (command === 'repeat') {
+                    let count = null, innerCmd = null;
+                    const litRepeat = rest.match(/^"(\d+)"\s*-\s*(.*)$/i);
+                    const varRepeat = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-\s*(.*)$/i);
+                    if (litRepeat) { count = parseInt(litRepeat[1], 10); innerCmd = litRepeat[2].trim(); }
+                    else if (varRepeat) {
+                        const nameErr = varNameError(varRepeat[1]);
+                        if (nameErr) return err('repeat: ' + nameErr);
+                        if (!variables[varRepeat[1]]) return err('repeat: variable not found');
+                        if (variables[varRepeat[1]].type !== 'number') return err('repeat: variable not number');
+                        count = variables[varRepeat[1]].value;
+                        innerCmd = varRepeat[2].trim();
+                    } else return err('repeat: bad syntax');
+                    if (!Number.isInteger(count) || count <= 0) return err('repeat: count must be positive integer');
+                    if (innerCmd === '') return err('repeat: missing command');
+                    const timeM = innerCmd.match(/^time\s*(?:"(\d+)"|\[\s*"([^"]+)"\s*\])\s*-\s*(.*)$/i);
+                    if (timeM) {
+                        let delay;
+                        if (timeM[1]) delay = parseInt(timeM[1], 10);
+                        else {
+                            if (!variables[timeM[2]]) return err('repeat: time var not found');
+                            if (variables[timeM[2]].type !== 'number') return err('repeat: time var not number');
+                            delay = variables[timeM[2]].value;
+                        }
+                        const actualCmd = timeM[3].trim();
+                        if (actualCmd === '') return err('repeat: missing command');
+                        let ex = 0;
+                        function sched() {
+                            if (ex >= count) return;
+                            setTimeout(() => {
+                                const output = processCommand(actualCmd, true);
+                                if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                                ex++; sched(); render();
+                            }, delay * 1000);
+                        }
+                        sched();
+                        return 'Scheduled ' + count + ' times every ' + delay + 's';
+                    } else {
+                        let combinedOutput = '';
+                        for (let i = 0; i < count; i++) {
+                            const output = processCommand(innerCmd, true);
+                            if (output !== '') combinedOutput += output + '\n';
+                        }
+                        return combinedOutput.replace(/\n$/, '');
+                    }
+                }
+
+                /* --------- if --------- */
+                if (command === 'if') {
+                    const trueIdx = rest.indexOf('-true=');
+                    const falseIdx = rest.indexOf('-false=');
+                    if (trueIdx === -1) return err('if: missing "-true="');
+                    if (falseIdx === -1) return err('if: missing "-false="');
+                    if (trueIdx > falseIdx) return err('if: -true must come before -false');
+                    const condPart = rest.substring(0, trueIdx);
+                    const trueRaw = rest.substring(trueIdx + 6, falseIdx);
+                    const falseRaw = rest.substring(falseIdx + 7);
+                    if (trueRaw.trim() === '') return err('if: -true= is empty');
+                    if (falseRaw.trim() === '') return err('if: -false= is empty');
+                    const tp = extractParenthesized(trueRaw, 0);
+                    if (!tp) return err('if: -true= must have (command)');
+                    const fp = extractParenthesized(falseRaw, 0);
+                    if (!fp) return err('if: -false= must have (command)');
+                    const condMatch = condPart.match(/^\[\s*"([^"]+)"\s*\]\s*-(eq|ne|gt|lt|ge|le)\s*-?\s*\[\s*"([^"]+)"\s*\]$/i);
+                    if (!condMatch) return err('if: bad condition');
+                    const v1Name = condMatch[1], op = condMatch[2].toLowerCase(), v2Name = condMatch[3];
+                    let ne = varNameError(v1Name); if (ne) return err('if: ' + ne);
+                    ne = varNameError(v2Name); if (ne) return err('if: ' + ne);
+                    if (!variables[v1Name] || !variables[v2Name]) return err('if: variable not found');
+                    const a = variables[v1Name], b = variables[v2Name];
+                    if (a.type !== b.type) return err('if: cannot compare different types');
+                    let condRes = false;
+                    if (a.type === 'number') {
+                        switch (op) {
+                            case 'eq': condRes = a.value === b.value; break;
+                            case 'ne': condRes = a.value !== b.value; break;
+                            case 'gt': condRes = a.value > b.value; break;
+                            case 'lt': condRes = a.value < b.value; break;
+                            case 'ge': condRes = a.value >= b.value; break;
+                            case 'le': condRes = a.value <= b.value; break;
+                        }
+                    } else {
+                        const l1 = String(a.value).length, l2 = String(b.value).length;
+                        switch (op) {
+                            case 'eq': condRes = l1 === l2; break;
+                            case 'ne': condRes = l1 !== l2; break;
+                            case 'gt': condRes = l1 > l2; break;
+                            case 'lt': condRes = l1 < l2; break;
+                            case 'ge': condRes = l1 >= l2; break;
+                            case 'le': condRes = l1 <= l2; break;
+                        }
+                    }
+                    return processCommand(condRes ? tp.content : fp.content, true);
+                }
+
+                /* --------- functional --------- */
+                if (command === 'functional') {
+                    if (rest === '') {
+                        if (Object.keys(functions).length === 0) return hint('(no functions defined)');
+                        let result = '';
+                        for (const name in functions) result += 'function: ' + name + '\n';
+                        return result.replace(/\n$/, '');
+                    }
+                    const callMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*$/i);
+                    if (callMatch) {
+                        const nameErr = varNameError(callMatch[1]);
+                        if (nameErr) return err('functional: ' + nameErr);
+                        if (!functions[callMatch[1]]) return err('functional: function "' + callMatch[1] + '" not found');
+                        executeSequentialCommands(functions[callMatch[1]]);
+                        return '';
+                    }
+                    const defMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-\s*([\s\S]*)$/);
+                    if (defMatch) {
+                        const nameErr = varNameError(defMatch[1]);
+                        if (nameErr) return err('functional: ' + nameErr);
+                        const bodyStr = defMatch[2].trim();
+                        if (bodyStr === '') return err('functional: body is empty');
+                        const subs = extractSubCommands(bodyStr);
+                        if (subs.length === 0) return err('functional: body must be (cmd1)-(cmd2)-...');
+                        functions[defMatch[1]] = subs;
+                        return '';
+                    }
+                    return err('functional: bad syntax');
+                }
+
+                if (command === 'functional-rename') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
+                    if (!match) return err('functional-rename: bad syntax');
+                    const ne1 = varNameError(match[1]); if (ne1) return err('functional-rename: ' + ne1);
+                    const ne2 = varNameError(match[2]); if (ne2) return err('functional-rename: ' + ne2);
+                    if (!functions[match[1]]) return err('functional-rename: function not found');
+                    if (functions[match[2]]) return err('functional-rename: target exists');
+                    functions[match[2]] = functions[match[1]];
+                    delete functions[match[1]]; return '';
+                }
+                if (command === 'functional-delete') {
+                    let param = rest.trim();
+                    if (param === '') return err('functional-delete: missing arg');
+                    if (param.toLowerCase() === '=all') { functions = {}; return ''; }
+                    if (param.startsWith('=')) param = param.substring(1).trim();
+                    if (param.startsWith('"') && param.endsWith('"')) param = param.slice(1, -1);
+                    const nameErr = varNameError(param);
+                    if (nameErr) return err('functional-delete: ' + nameErr);
+                    if (!functions[param]) return err('functional-delete: function not found');
+                    delete functions[param]; return '';
+                }
+                if (command === 'functional-replace') {
+                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*-\s*([\s\S]*)$/);
+                    if (!match) return err('functional-replace: bad syntax');
+                    const nameErr = varNameError(match[1]);
+                    if (nameErr) return err('functional-replace: ' + nameErr);
+                    if (!functions[match[1]]) return err('functional-replace: function not found');
+                    const bodyStr = match[2].trim();
+                    if (bodyStr === '') return err('functional-replace: body is empty');
+                    const subs = extractSubCommands(bodyStr);
+                    if (subs.length === 0) return err('functional-replace: bad body');
+                    functions[match[1]] = subs; return '';
+                }
+
+                return err('unknown command "' + command + '". Type "help" or "cs-help" for commands.');
+            }
+
+            /* Input & render events */
+            terminal.addEventListener('click', () => hiddenInput.focus());
+            terminal.addEventListener('wheel', e => e.preventDefault(), { passive: false });
+
+            hiddenInput.addEventListener('input', function(e) {
+                if (pendingInput && (pendingInput.kind === 'long-press' || pendingInput.kind === 'long-press-exec')) {
+                    e.target.value = '';
+                    currentInput = '';
+                    return;
+                }
+                const val = e.target.value;
+                const filtered = sanitizeAscii(val);
+                if (filtered !== val) hiddenInput.value = filtered;
+                currentInput = filtered;
+                render();
+            });
+
+            hiddenInput.addEventListener('keydown', function(e) {
+                if (pendingInput && (pendingInput.kind === 'long-press' || pendingInput.kind === 'long-press-exec')) {
+                    e.preventDefault();
+                    handleLongPressDown(e.key);
+                    return;
+                }
+
+                if (e.key === 'Enter') {
+                    if (e.shiftKey) {
+                        e.preventDefault();
+                        currentInput += '\n';
+                        hiddenInput.value = currentInput;
+                        render();
+                        return;
+                    }
+                    e.preventDefault();
+                    const cleanInput = sanitizeAscii(currentInput.replace(/[\r\n]/g, ''));
+
+                    if (pendingInput) {
+                        if (pendingInput.kind === 'choose') {
+                            const optName = cleanInput.trim();
+                            if (!pendingInput.options.hasOwnProperty(optName)) {
+                                outputLines.push('<span class="hint-msg">That option does not exist. Please enter a valid option.</span>');
+                                currentInput = ''; hiddenInput.value = '';
+                                render();
+                                return;
+                            }
+                            const optValue = pendingInput.options[optName];
+                            const varName = pendingInput.varName;
+                            const type = pendingInput.type;
+                            const color = pendingInput.color;
+                            if (type === 'text') {
+                                variables[varName] = { type: 'text', value: optValue };
+                            } else {
+                                const num = parseFloat(optValue);
+                                variables[varName] = { type: 'number', value: isNaN(num) ? 0 : num };
+                            }
+                            if (color) variables[varName].color = color;
+                            pendingInput = null; currentInput = ''; hiddenInput.value = '';
+                            render();
+                        } else if (pendingInput.kind === 'choose-exec') {
+                            const optName = cleanInput.trim();
+                            const opt = pendingInput.options.find(o => o.name === optName);
+                            if (!opt) {
+                                outputLines.push('<span class="hint-msg">That option does not exist. Please enter a valid option.</span>');
+                                currentInput = ''; hiddenInput.value = '';
+                                render();
+                                return;
+                            }
+                            pendingInput = null;
+                            currentInput = ''; hiddenInput.value = '';
+                            const output = processCommand(opt.cmd, true);
+                            if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                            render();
+                        } else {
+                            const varName = pendingInput.varName;
+                            const type = pendingInput.type;
+                            const color = pendingInput.color;
+                            if (type === 'text') {
+                                variables[varName] = { type: 'text', value: cleanInput };
+                            } else {
+                                const num = parseFloat(cleanInput);
+                                if (isNaN(num)) {
+                                    outputLines.push(err('input: "' + cleanInput + '" is not a valid number; variable "' + varName + '" was set to 0'));
+                                    variables[varName] = { type: 'number', value: 0 };
+                                } else {
+                                    variables[varName] = { type: 'number', value: num };
+                                }
+                            }
+                            if (color) variables[varName].color = color;
+                            pendingInput = null; currentInput = ''; hiddenInput.value = '';
+                            render();
+                        }
+                    } else {
+                        const trimmedInput = cleanInput.trim();
+                        if (trimmedInput.startsWith(';') || trimmedInput.startsWith('#')) {
+                            currentInput = ''; hiddenInput.value = '';
+                            render();
+                            return;
+                        }
+                        outputLines.push(PROMPT + escapeHtml(cleanInput));
+                        const output = processCommand(cleanInput, false);
+                        if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
+                        currentInput = ''; hiddenInput.value = '';
+                        render();
+                    }
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    terminal.scrollTop -= 40;
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    terminal.scrollTop += 40;
+                }
+            });
+
+            hiddenInput.addEventListener('keyup', function(e) {
+                if (pendingInput && (pendingInput.kind === 'long-press' || pendingInput.kind === 'long-press-exec')) {
+                    e.preventDefault();
+                    handleLongPressUp(e.key);
+                }
+            });
+
+            window.addEventListener('blur', function() {
+                if (pendingInput && (pendingInput.kind === 'long-press' || pendingInput.kind === 'long-press-exec') && pendingInput.pressedKey) {
+                    if (pendingInput.timers && pendingInput.timers.length) {
+                        for (const t of pendingInput.timers) clearTimeout(t);
+                    }
+                    pendingInput.timers = [];
+                    pendingInput.pressedKey = null;
+                    pendingInput.triggered = false;
+                    render();
+                }
+            });
+
+            hiddenInput.addEventListener('blur', () => setTimeout(() => hiddenInput.focus(), 0));
+
+            render();
+            hiddenInput.focus();
+        })();
+    </script>
+</body>
+</html>
