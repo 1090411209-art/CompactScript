@@ -208,18 +208,37 @@
                 '  number[concatenation]-"expr"  output numeric string built by ["varName"] references',
                 '',
                 '[List]',
-                '  list["name"]-item1(cmd1)-item2(cmd2)-...  create a list',
+                '  Item names must be wrapped in double quotes or a ["varName"] reference.',
+                '  list["name"]-"item1"(cmd1)-"item2"(cmd2)-...  create a list',
+                '    Example: list["rrr"]-"hhh"(text"hhh")-"jjj"(number"77")',
+                '    Item names may also be variables:',
+                '      number["h"]"7"  list["rrr"]-["h"](text"aaa")',
                 '  list["name"]                  create an empty list',
                 '  list["name"]"item"            execute the command stored in item',
+                '  list["name"]=["varName"]      execute the item whose name is the variable value',
+                '    Example: number["h"]"1"  list["ggg"]=["h"]',
                 '  list                          list all lists and their items',
-                '  list-add["name"]-item(cmd)    add a new item to an existing list',
-                '  list-delete["name"]"item"     delete an item from a list',
+                '  list-add["name"]-"item"(cmd)  add a new item to an existing list',
+                '    Example: list-add["rrr"]-"m"(text"kkk")',
+                '  list-add["name"]-["var"](cmd) add a new item whose name is a variable value',
+                '    Example: number["rrr"]"7"  list-add["ggh"]-["rrr"](text"111")',
+                '  list-delete["name"]"item"     delete a literal item from a list',
+                '  list-delete["name"]=["var"]   delete the item whose name is the variable value',
+                '    Example: list-delete["ggh"]=["rrr"]',
                 '  list-delete["name"]=all       delete all items inside a list',
                 '  list-delete =all              delete all lists',
-                '  list-rename["old"]"new"       rename a list',
-                '  list-replace["name"]-oldItem-newItem(newCmd)  replace an item',
+                '  list-rename["old"]"new"       rename a list (both literal names)',
+                '  list-rename["old"]=["var"]    new list name is a variable value',
+                '    Example: number["hhh"]"111"  list-rename["rrr"]=["hhh"]',
+                '  list-rename=["var"]"new"      old list name is a variable value',
+                '  list-rename=["v1"]=["v2"]     both list names are variable values',
+                '  list-replace["name"]"old"-"new"(cmd)          replace an item (both literal)',
+                '  list-replace["name"]-["v"]-"new"(cmd)         old name from a variable',
+                '  list-replace["name"]-"old"-["v"](cmd)         new name from a variable',
+                '  list-replace["name"]-["v1"]-["v2"]=(cmd)      both names from variables',
                 '    The old item name is enough; no need to match its old command.',
-                '    Example: list-replace["ghg"]-1-2(text"dsds")',
+                '    The "(" or "=(" before the command both work.',
+                '    Example: list-replace["ggh"]-["rrr"]-"2"(text"ddd")',
                 '',
                 '[Color System]',
                 '  Available colors (24 total):',
@@ -309,11 +328,11 @@
                 '  functional-replace["name"]-(cmd1)-(cmd2)-...  replace function body',
                 '',
                 '[Save & Load]',
-                '  save"name"                    export a .cscrip file (plain text, default)',
-                '  save"name"-xor                export a .cscrip file with XOR-encrypted payload',
+                '  save"name"                    export a .cscript file (plain text, default)',
+                '  save"name"-xor                export a .cscript file with XOR-encrypted payload',
                 '    Files are exported to your downloads folder.',
-                '  load                          open file picker to load a .cscrip file',
-                '    Encrypted and plain .cscrip files are both supported; the loader auto-detects.',
+                '  load                          open file picker to load a .cscript file',
+                '    Encrypted and plain .cscript files are both supported; the loader auto-detects.',
                 '    If the file is corrupted or the extension does not match, a red error is shown.',
                 '',
                 '[System & Utility]',
@@ -334,7 +353,9 @@
                 '  run(cmd1)-(cmd2)-...         execute multiple commands',
                 '',
                 '[Comments]',
-                '  ; or # at line start         comment line ignored',
+                '  #"..." at any position       comment content, removed before parsing',
+                '    Everything between #" and the next " is stripped from the line.',
+                '    Example: text"hi" #"this is a comment"',
                 '',
                 'All input is ASCII only, non-ASCII chars become ?',
                 'Shift+Enter inserts a newline; each line shows a prompt, newlines are removed on submit.'
@@ -361,6 +382,10 @@
                     } else result += '?';
                 }
                 return result;
+            }
+
+            function stripComments(str) {
+                return str.replace(/#"[^"]*"/g, '');
             }
 
             function escapeHtml(str) {
@@ -467,11 +492,75 @@
                 return result;
             }
 
-            /* ============ Save / Load (file-based, .cscrip only with optional XOR) ============ */
+            /* ============ List name helpers ============ */
 
-            const CS_MAGIC_TEXT = 'CSCRIPT-CSCRIP-V1\n';
-            const CS_MAGIC_XOR = 'CSCRIPT-CSCRIP-XOR-V1\n';
-            const FILE_EXT = '.cscrip';
+            // Matches a leading "literal" or ["varName"] segment.
+            function matchItemName(str) {
+                let m = str.match(/^\[\s*"([^"]+)"\s*\]/);
+                if (m) return { type: 'var', name: m[1], length: m[0].length };
+                m = str.match(/^"([^"]*)"/);
+                if (m) return { type: 'lit', name: m[1], length: m[0].length };
+                return null;
+            }
+
+            // Resolves a matchItemName result to the actual item name string.
+            function resolveItemName(match, cmdPrefix) {
+                if (match.type === 'lit') return { ok: true, name: match.name };
+                const ne = varNameError(match.name);
+                if (ne) return { ok: false, error: cmdPrefix + ': ' + ne };
+                if (!variables[match.name]) {
+                    return { ok: false, error: cmdPrefix + ': variable "' + match.name + '" not found' };
+                }
+                const v = variables[match.name];
+                let name;
+                if (v.type === 'number') {
+                    const formatted = formatNumber(v.value);
+                    name = (formatted === null) ? String(v.value) : formatted;
+                } else {
+                    name = String(v.value);
+                }
+                return { ok: true, name: name };
+            }
+
+            // Parses a "list name expression". Accepted forms:
+            //   ["literal"]  -> literal name
+            //   "literal"    -> literal name
+            //   =["varName"] -> name comes from the variable value
+            // Returns { type, name, length } or null.
+            function parseNameExpr(str) {
+                let m = str.match(/^=\s*\[\s*"([^"]*)"\s*\]/);
+                if (m) return { type: 'var', name: m[1], length: m[0].length };
+                m = str.match(/^\[\s*"([^"]*)"\s*\]/);
+                if (m) return { type: 'lit', name: m[1], length: m[0].length };
+                m = str.match(/^"([^"]*)"/);
+                if (m) return { type: 'lit', name: m[1], length: m[0].length };
+                return null;
+            }
+
+            // Resolves a parseNameExpr result to the actual list name string.
+            function resolveNameExpr(res, cmdPrefix) {
+                if (res.type === 'lit') return { ok: true, name: res.name };
+                const ne = varNameError(res.name);
+                if (ne) return { ok: false, error: cmdPrefix + ': ' + ne };
+                if (!variables[res.name]) {
+                    return { ok: false, error: cmdPrefix + ': variable "' + res.name + '" not found' };
+                }
+                const v = variables[res.name];
+                let name;
+                if (v.type === 'number') {
+                    const formatted = formatNumber(v.value);
+                    name = (formatted === null) ? String(v.value) : formatted;
+                } else {
+                    name = String(v.value);
+                }
+                return { ok: true, name: name };
+            }
+
+            /* ============ Save / Load (file-based, .cscript only with optional XOR) ============ */
+
+            const CS_MAGIC_TEXT = 'CSCRIPT-CSCRIPT-V1\n';
+            const CS_MAGIC_XOR = 'CSCRIPT-CSCRIPT-XOR-V1\n';
+            const FILE_EXT = '.cscript';
 
             const XOR_KEY = new Uint8Array([
                 0x5A, 0x37, 0xC1, 0x9E, 0x42, 0x88, 0x1D, 0xF6,
@@ -530,7 +619,7 @@
             function openLoadDialog() {
                 const input = document.createElement('input');
                 input.type = 'file';
-                input.accept = '.cscrip,text/plain,application/octet-stream';
+                input.accept = '.cscript,text/plain,application/octet-stream';
                 input.style.display = 'none';
                 document.body.appendChild(input);
 
@@ -817,7 +906,6 @@
                 return ok(segments);
             }
 
-            // Convert a list of {type, value} prompt tokens into segments.
             function promptTokensToSegments(tokens) {
                 const segments = [];
                 let currentColor = null;
@@ -944,7 +1032,6 @@
 
             /* ============ Exec-mode format parsers ============ */
 
-            // Parses: "prompt"-color["c"]-"opt1"=(cmd1)-"opt2"=(cmd2)...
             function parseChooseExecFormat(str) {
                 const promptTokens = [];
                 const options = [];
@@ -964,7 +1051,6 @@
                         let k = j + 1;
                         while (k < str.length && /\s/.test(str[k])) k++;
                         if (k < str.length && str[k] === '=' && scanningPrompt) {
-                            // option entry
                             k++;
                             while (k < str.length && /\s/.test(str[k])) k++;
                             if (k >= str.length || str[k] !== '(') {
@@ -1014,7 +1100,6 @@
                             i += rMatch[0].length;
                             continue;
                         }
-                        // plain dash
                         continue;
                     }
 
@@ -1025,7 +1110,6 @@
                 return ok({ promptTokens, options });
             }
 
-            // Parses: "prompt"-color["c"]-time["N"]"key"=(cmd)-time["N"]"key"=(cmd)...
             function parseLongPressExecFormat(str) {
                 const promptTokens = [];
                 const entries = [];
@@ -1370,6 +1454,7 @@
 
             function processCommand(input, skipDisplayCommand = false) {
                 input = sanitizeAscii(input.trim());
+                input = stripComments(input).trim();
                 if (input === '') return '';
 
                 const cmdMatch = input.match(/^(text-color|number-color|text|number|computation|clear|variable-color|variable-type|variable-delete|variable-rename|variable-replace|variable|cs-help|time|random-number|random-text|random|repeat|help|if|length|input-choose|input|run|while|save|load|functional-rename|functional-delete|functional-replace|functional|list-add|list-delete|list-rename|list-replace|list)\s*(.*)$/i);
@@ -1549,12 +1634,10 @@
 
                 /* --------- input-choose (all modes) --------- */
                 if (command === 'input-choose') {
-                    // ----- LONG-PRESS -----
                     const lpMatch = rest.match(/^\[\s*long-press\s*\]([\s\S]*)$/i);
                     if (lpMatch) {
                         let remaining = lpMatch[1].trim();
 
-                        // Old storage mode: -["varName"]-type"prompt"-time["N"]"key"="value"
                         if (/^-\s*\[\s*"/.test(remaining)) {
                             const vnMatch = remaining.match(/^-\s*\[\s*"([^"]+)"\s*\]\s*/);
                             const varName = vnMatch[1];
@@ -1649,7 +1732,6 @@
                             return '';
                         }
 
-                        // New exec mode: "prompt"-time["N"]"key"=(cmd)
                         const r = parseLongPressExecFormat(remaining);
                         if (!r.ok) return err('input-choose[long-press]: ' + r.error);
                         const promptSegments = promptTokensToSegments(r.value.promptTokens);
@@ -1675,8 +1757,6 @@
                         return '';
                     }
 
-                    // ----- REGULAR -----
-                    // New exec mode: input-choose"prompt"-"opt"=(cmd)
                     if (!rest.startsWith('[')) {
                         const r = parseChooseExecFormat(rest);
                         if (!r.ok) return err('input-choose: ' + r.error);
@@ -1693,7 +1773,6 @@
                         return '';
                     }
 
-                    // Old storage mode: input-choose["var"]-type"prompt"-"opt"="value"
                     const headerMatch = rest.match(/^\[\s*"([^"]+)"\s*\]([\s\S]*)$/);
                     if (!headerMatch) return err('input-choose: Usage: input-choose["var"]-type"prompt"-"opt"="val"...');
                     const varName = headerMatch[1];
@@ -1855,6 +1934,39 @@
                         }
                         return result.replace(/\n$/, '');
                     }
+
+                    /* dynamic index: list["name"]=["varName"] */
+                    const dynamicIndexMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*=\s*\[\s*"([^"]+)"\s*\]\s*$/);
+                    if (dynamicIndexMatch) {
+                        const listName = dynamicIndexMatch[1];
+                        const varName = dynamicIndexMatch[2];
+
+                        if (!lists[listName]) {
+                            return err('list: list "' + listName + '" not found');
+                        }
+                        const ne = varNameError(varName);
+                        if (ne) return err('list: ' + ne);
+                        if (!variables[varName]) {
+                            return err('list: variable "' + varName + '" not found');
+                        }
+
+                        const v = variables[varName];
+                        let itemName;
+                        if (v.type === 'number') {
+                            const formatted = formatNumber(v.value);
+                            itemName = (formatted === null) ? String(v.value) : formatted;
+                        } else {
+                            itemName = String(v.value);
+                        }
+
+                        if (!lists[listName].hasOwnProperty(itemName)) {
+                            return err('list: item "' + itemName + '" not found in list "' + listName +
+                                '". Available items: ' + (Object.keys(lists[listName]).join(', ') || '(none)'));
+                        }
+                        return processCommand(lists[listName][itemName], true);
+                    }
+
+                    /* literal item access: list["name"]"item" */
                     const accessMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
                     if (accessMatch) {
                         const listName = accessMatch[1], itemName = accessMatch[2];
@@ -1862,8 +1974,10 @@
                         if (!lists[listName].hasOwnProperty(itemName)) return err('list: item "' + itemName + '" not found');
                         return processCommand(lists[listName][itemName], true);
                     }
-                    const createMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*(.*)$/i);
-                    if (!createMatch) return err('list: bad syntax');
+
+                    /* create list: list["name"]-"item"(cmd)-... */
+                    const createMatch = rest.match(/^\[\s*"([^"]+)"\s*\]([\s\S]*)$/i);
+                    if (!createMatch) return err('list: bad syntax. Usage: list["name"]-"item"(cmd)-...');
                     const listName = createMatch[1];
                     let itemsPart = createMatch[2].trim();
                     const nameErr = varNameError(listName);
@@ -1873,103 +1987,212 @@
                     const items = {};
                     while (itemsPart.length > 0) {
                         itemsPart = itemsPart.trim();
-                        if (!itemsPart.startsWith('-')) return err('list: expected "-"');
+                        if (!itemsPart.startsWith('-')) {
+                            return err('list: expected "-" before item definition, got "' + itemsPart + '"');
+                        }
                         itemsPart = itemsPart.substring(1).trim();
-                        const parenIndex = itemsPart.indexOf('(');
-                        if (parenIndex === -1) return err('list: bad item definition');
-                        const itemName = itemsPart.substring(0, parenIndex).trim();
-                        if (itemName === '') return err('list: item name empty');
-                        if (items.hasOwnProperty(itemName)) return err('list: duplicate item "' + itemName + '"');
-                        const pr = extractParenthesized(itemsPart, parenIndex);
-                        if (!pr) return err('list: missing ")"');
+
+                        const nameRes = matchItemName(itemsPart);
+                        if (!nameRes) {
+                            return err('list: expected item name in "..." or ["varName"], got "' + itemsPart.substring(0, 20) + '"');
+                        }
+                        const resolved = resolveItemName(nameRes, 'list');
+                        if (!resolved.ok) return err(resolved.error);
+                        const itemName = resolved.name;
+                        itemsPart = itemsPart.substring(nameRes.length).trim();
+
+                        if (items.hasOwnProperty(itemName)) {
+                            return err('list: duplicate item "' + itemName + '" in list "' + listName + '"');
+                        }
+                        if (itemsPart[0] !== '(') {
+                            return err('list: expected "(" after item name "' + itemName + '"');
+                        }
+                        const pr = extractParenthesized(itemsPart, 0);
+                        if (!pr) return err('list: missing ")" for item "' + itemName + '"');
                         items[itemName] = pr.content;
                         itemsPart = itemsPart.substring(pr.endPos).trim();
                     }
                     lists[listName] = items; return '';
                 }
+
+                /* --------- list-add --------- */
                 if (command === 'list-add') {
-                    const lMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*(.*)$/i);
-                    if (!lMatch) return err('list-add: bad syntax');
+                    const lMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*([\s\S]*)$/i);
+                    if (!lMatch) return err('list-add: bad syntax. Usage: list-add["name"]-"item"(cmd)');
                     const listName = lMatch[1];
                     let remaining = lMatch[2].trim();
-                    if (!lists[listName]) return err('list-add: list not found');
-                    if (!remaining.startsWith('-')) return err('list-add: expected "-"');
+                    if (!lists[listName]) return err('list-add: list "' + listName + '" not found');
+                    if (!remaining.startsWith('-')) {
+                        return err('list-add: expected "-" before item name');
+                    }
                     remaining = remaining.substring(1).trim();
-                    const parenIndex = remaining.indexOf('(');
-                    if (parenIndex === -1) return err('list-add: bad item');
-                    const itemName = remaining.substring(0, parenIndex).trim();
-                    if (itemName === '') return err('list-add: item name empty');
-                    if (lists[listName].hasOwnProperty(itemName)) return err('list-add: item exists');
-                    const pr = extractParenthesized(remaining, parenIndex);
-                    if (!pr) return err('list-add: missing ")"');
+
+                    const nameRes = matchItemName(remaining);
+                    if (!nameRes) {
+                        return err('list-add: expected item name in "..." or ["varName"], got "' + remaining.substring(0, 20) + '"');
+                    }
+                    const resolved = resolveItemName(nameRes, 'list-add');
+                    if (!resolved.ok) return err(resolved.error);
+                    const itemName = resolved.name;
+                    remaining = remaining.substring(nameRes.length).trim();
+
+                    if (lists[listName].hasOwnProperty(itemName)) {
+                        return err('list-add: item "' + itemName + '" already exists in list "' + listName + '"');
+                    }
+                    if (remaining[0] !== '(') {
+                        return err('list-add: expected "(" after item name "' + itemName + '"');
+                    }
+                    const pr = extractParenthesized(remaining, 0);
+                    if (!pr) return err('list-add: missing ")" for item "' + itemName + '"');
                     const after = remaining.substring(pr.endPos).trim();
-                    if (after !== '') return err('list-add: trailing text');
-                    lists[listName][itemName] = pr.content; return '';
+                    if (after !== '') return err('list-add: unexpected trailing text "' + after + '"');
+                    lists[listName][itemName] = pr.content;
+                    return '';
                 }
+
+                /* --------- list-delete --------- */
                 if (command === 'list-delete') {
                     let param = rest.trim();
-                    if (param === '') return err('list-delete: missing arg');
+                    if (param === '') return err('list-delete: missing argument. Usage: list-delete["list"]"item", list-delete["list"]=["var"], list-delete["list"]=all or list-delete =all');
                     if (param.toLowerCase() === '=all') { lists = {}; return ''; }
+
                     const allMatch = param.match(/^\[\s*"([^"]+)"\s*\]\s*=\s*all\s*$/i);
                     if (allMatch) {
-                        if (!lists[allMatch[1]]) return err('list-delete: list not found');
-                        lists[allMatch[1]] = {}; return '';
+                        const listName = allMatch[1];
+                        if (!lists[listName]) return err('list-delete: list "' + listName + '" not found');
+                        lists[listName] = {}; return '';
                     }
-                    const match = param.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
-                    if (!match) return err('list-delete: bad syntax');
-                    if (!lists[match[1]]) return err('list-delete: list not found');
-                    if (!lists[match[1]].hasOwnProperty(match[2])) return err('list-delete: item not found');
-                    delete lists[match[1]][match[2]]; return '';
+
+                    const dynMatch = param.match(/^\[\s*"([^"]+)"\s*\]\s*=\s*\[\s*"([^"]+)"\s*\]\s*$/);
+                    if (dynMatch) {
+                        const listName = dynMatch[1];
+                        const varName = dynMatch[2];
+                        if (!lists[listName]) return err('list-delete: list "' + listName + '" not found');
+                        const ne = varNameError(varName);
+                        if (ne) return err('list-delete: ' + ne);
+                        if (!variables[varName]) return err('list-delete: variable "' + varName + '" not found');
+                        const v = variables[varName];
+                        let itemName;
+                        if (v.type === 'number') {
+                            const formatted = formatNumber(v.value);
+                            itemName = (formatted === null) ? String(v.value) : formatted;
+                        } else {
+                            itemName = String(v.value);
+                        }
+                        if (!lists[listName].hasOwnProperty(itemName)) {
+                            return err('list-delete: item "' + itemName + '" not found in list "' + listName + '"');
+                        }
+                        delete lists[listName][itemName];
+                        return '';
+                    }
+
+                    const litMatch = param.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
+                    if (litMatch) {
+                        const listName = litMatch[1], itemName = litMatch[2];
+                        if (!lists[listName]) return err('list-delete: list "' + listName + '" not found');
+                        if (!lists[listName].hasOwnProperty(itemName)) {
+                            return err('list-delete: item "' + itemName + '" not found in list "' + listName + '"');
+                        }
+                        delete lists[listName][itemName];
+                        return '';
+                    }
+
+                    return err('list-delete: bad syntax. Usage: list-delete["list"]"item", list-delete["list"]=["var"], list-delete["list"]=all or list-delete =all');
                 }
+
+                /* --------- list-rename (with variable support) --------- */
                 if (command === 'list-rename') {
-                    const match = rest.match(/^\[\s*"([^"]+)"\s*\]\s*"([^"]*)"\s*$/);
-                    if (!match) return err('list-rename: bad syntax');
-                    const nameErr1 = varNameError(match[1]);
-                    if (nameErr1) return err('list-rename: ' + nameErr1);
-                    const nameErr2 = varNameError(match[2]);
-                    if (nameErr2) return err('list-rename: ' + nameErr2);
-                    if (!lists[match[1]]) return err('list-rename: list not found');
-                    if (lists[match[2]]) return err('list-rename: target exists');
-                    lists[match[2]] = lists[match[1]];
-                    delete lists[match[1]]; return '';
+                    let remaining = rest.trim();
+                    if (remaining === '') {
+                        return err('list-rename: bad syntax. Usage: list-rename["old"]"new" or list-rename["old"]=["var"] or list-rename=["var"]"new" or list-rename=["v1"]=["v2"]');
+                    }
+
+                    const oldRes = parseNameExpr(remaining);
+                    if (!oldRes) {
+                        return err('list-rename: expected old list name in ["name"] or =["varName"], got "' + remaining.substring(0, 20) + '"');
+                    }
+                    remaining = remaining.substring(oldRes.length).trim();
+
+                    const newRes = parseNameExpr(remaining);
+                    if (!newRes) {
+                        return err('list-rename: expected new list name in "name" or =["varName"], got "' + remaining.substring(0, 20) + '"');
+                    }
+                    remaining = remaining.substring(newRes.length).trim();
+
+                    if (remaining !== '') {
+                        return err('list-rename: unexpected trailing text "' + remaining + '"');
+                    }
+
+                    const oldR = resolveNameExpr(oldRes, 'list-rename');
+                    if (!oldR.ok) return err(oldR.error);
+                    const newR = resolveNameExpr(newRes, 'list-rename');
+                    if (!newR.ok) return err(newR.error);
+                    const oldName = oldR.name;
+                    const newName = newR.name;
+
+                    const nameErr1 = varNameError(oldName);
+                    if (nameErr1) {
+                        return err('list-rename: resolved old name: ' + nameErr1);
+                    }
+                    const nameErr2 = varNameError(newName);
+                    if (nameErr2) {
+                        return err('list-rename: resolved new name: ' + nameErr2);
+                    }
+
+                    if (!lists[oldName]) return err('list-rename: list "' + oldName + '" not found');
+                    if (lists[newName]) return err('list-rename: list "' + newName + '" already exists');
+                    lists[newName] = lists[oldName];
+                    delete lists[oldName];
+                    return '';
                 }
+
+                /* --------- list-replace --------- */
                 if (command === 'list-replace') {
-                    const lMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*(.*)$/i);
+                    const lMatch = rest.match(/^\[\s*"([^"]+)"\s*\]\s*([\s\S]*)$/i);
                     if (!lMatch) {
-                        return err('list-replace: bad syntax. Usage: list-replace["list"]-oldItem-newItem(newCmd)');
+                        return err('list-replace: bad syntax. Usage: list-replace["list"]"old"-"new"(cmd)');
                     }
                     const listName = lMatch[1];
                     let remaining = lMatch[2].trim();
                     if (!lists[listName]) return err('list-replace: list "' + listName + '" not found');
+
+                    if (remaining.startsWith('-')) {
+                        remaining = remaining.substring(1).trim();
+                    }
+
+                    const oldNameRes = matchItemName(remaining);
+                    if (!oldNameRes) {
+                        return err('list-replace: expected old item name in "..." or ["varName"], got "' + remaining.substring(0, 20) + '"');
+                    }
+                    const oldResolved = resolveItemName(oldNameRes, 'list-replace');
+                    if (!oldResolved.ok) return err(oldResolved.error);
+                    const oldName = oldResolved.name;
+                    remaining = remaining.substring(oldNameRes.length).trim();
+
                     if (!remaining.startsWith('-')) {
-                        return err('list-replace: expected "-" before old item name. Usage: list-replace["list"]-oldItem-newItem(newCmd)');
+                        return err('list-replace: expected "-" between old and new item name');
                     }
                     remaining = remaining.substring(1).trim();
 
-                    const dashIdx = remaining.indexOf('-');
-                    if (dashIdx === -1) {
-                        return err('list-replace: expected "-" between old item and new item');
+                    const newNameRes = matchItemName(remaining);
+                    if (!newNameRes) {
+                        return err('list-replace: expected new item name in "..." or ["varName"], got "' + remaining.substring(0, 20) + '"');
                     }
-                    const oldName = remaining.substring(0, dashIdx).trim();
-                    if (oldName === '') {
-                        return err('list-replace: old item name cannot be empty');
-                    }
-                    remaining = remaining.substring(dashIdx + 1).trim();
+                    const newResolved = resolveItemName(newNameRes, 'list-replace');
+                    if (!newResolved.ok) return err(newResolved.error);
+                    const newName = newResolved.name;
+                    remaining = remaining.substring(newNameRes.length).trim();
 
-                    const parenIndex = remaining.indexOf('(');
-                    if (parenIndex === -1) {
-                        return err('list-replace: new item must look like newItemName(newCmd), e.g. -2(text"dsds")');
+                    if (remaining.startsWith('=')) {
+                        remaining = remaining.substring(1).trim();
                     }
-                    const newName = remaining.substring(0, parenIndex).trim();
-                    if (newName === '') {
-                        return err('list-replace: new item name cannot be empty');
+                    if (remaining[0] !== '(') {
+                        return err('list-replace: expected "(" or "=(" before the command');
                     }
-                    const newP = extractParenthesized(remaining, parenIndex);
-                    if (!newP) {
-                        return err('list-replace: missing closing ")" for new item');
-                    }
-                    const newCmd = newP.content;
-                    const after = remaining.substring(newP.endPos).trim();
+                    const pr = extractParenthesized(remaining, 0);
+                    if (!pr) return err('list-replace: missing closing ")" for command');
+                    const newCmd = pr.content;
+                    const after = remaining.substring(pr.endPos).trim();
                     if (after !== '') {
                         return err('list-replace: unexpected trailing text "' + after + '"');
                     }
@@ -2479,7 +2702,7 @@
                         return;
                     }
                     e.preventDefault();
-                    const cleanInput = sanitizeAscii(currentInput.replace(/[\r\n]/g, ''));
+                    let cleanInput = sanitizeAscii(currentInput.replace(/[\r\n]/g, ''));
 
                     if (pendingInput) {
                         if (pendingInput.kind === 'choose') {
@@ -2537,14 +2760,14 @@
                             render();
                         }
                     } else {
-                        const trimmedInput = cleanInput.trim();
-                        if (trimmedInput.startsWith(';') || trimmedInput.startsWith('#')) {
+                        const displayInput = stripComments(cleanInput).trim();
+                        if (displayInput === '') {
                             currentInput = ''; hiddenInput.value = '';
                             render();
                             return;
                         }
-                        outputLines.push(PROMPT + escapeHtml(cleanInput));
-                        const output = processCommand(cleanInput, false);
+                        outputLines.push(PROMPT + escapeHtml(displayInput));
+                        const output = processCommand(displayInput, false);
                         if (output !== '') output.split('\n').forEach(line => outputLines.push(line));
                         currentInput = ''; hiddenInput.value = '';
                         render();
